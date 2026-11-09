@@ -28,7 +28,7 @@ A `session.new` `secret_env` map is a second secret-bearing carrier. The
 protocol type prints only an entry count and reports a malformed entry with
 fixed text; the daemon takes the values out of the request before any record,
 hook or event is built, and sends them once to the worker in `Initialize`
-alongside the profile environment. They are not persisted, so a resume or fork of
+alongside the profile environment. They are not persisted, so a resume of
 a profile that declares `secret_env` slots is refused with `secret_env_missing`.
 The slot names come from the host profile, never from the wire.
 
@@ -78,10 +78,4 @@ credential handling, and a client that reads a Linear token takes it from the
 platform credential store (macOS Keychain, Linux Secret Service) by entry name,
 reading it afresh for every request and never caching it, logging it, putting it
 in an error, or writing it to config, session metadata, daemon state, or the
-event log. Relay credentials the CLI stores go through the same platform
-credential store and follow the same rule: references only, never values.
-
-On macOS the release binaries are ad-hoc signed, which gives them no stable
-designated requirement. After an upgrade the system may therefore ask again
-whether `pohunek` may access its `pohunek-relay` Keychain items; "Always Allow"
-applies to that build only. This is expected, not a sign of tampering.
+event log.

@@ -56,7 +56,7 @@ older than version 15 register nothing for `UserPromptSubmit`, so a waited input
 gets no prompt acceptance and ends in `session_input_timeout` unless activity
 answers it, Claude state hooks older than version 16 do not repeat the identity
 report when a turn ends, so a session whose `SessionStart` hook the agent killed
-before it reported keeps no native reference (resume and fork refuse it) until
+before it reported keeps no native reference (resume refuses it) until
 the hooks are reinstalled and a turn ends, and write no `hook_started` and
 `hook_finished` trace lines and no start marker (reinstall the hooks of every Claude and Codex home:
 the version marker is shared, so `integration status` reports all of them
@@ -117,7 +117,7 @@ upgrade, and installs that bypassed `service upgrade`:
    upgrade never rewrites a user-modified Hermes plugin or policy.
 
 The installer wrapper prints these commands after a successful install or
-upgrade. A new, resumed or forked session whose agent has outdated Claude or
+upgrade. A new or resumed session whose agent has outdated Claude or
 Codex hook assets carries a session warning of kind `hook` (shown by
 `session new`, `session list` and `session inspect`) that names the exact install
 command; the session still starts. Outside `service upgrade`, files in a user-owned config home change only by an
@@ -541,9 +541,14 @@ is refused the same way.
 `--accept-runtime-loss` is the one consent for the service-managed upgrade below;
 there is no second flag. See [debug session runtime](debug-session-runtime.md).
 
+After a core upgrade, move the assistant context package to the version that
+matches it: `pohunek plugin update pohunek.context.assistant <archive> --sha256
+<digest>` installs and selects it (a plain `plugin install` leaves the old version
+selected); see `docs/install.md`, "Install the assistant package", and the
+[context package guide](../guides/runtime-packages.md#declaring-a-context-package).
 When the assistant feature is available, its update intent should compare the
-bundle version in the launch snapshot with the installed binary's version and
-check behavior against that binary before recommending edits.
+snapshot's `pohunek_version` and the package version in the prompt with the
+installed binary's version and check behavior against that binary before recommending edits.
 
 ## Testing an install or upgrade with an isolated HOME (macOS)
 
@@ -709,7 +714,7 @@ the upgrade is not what ends it.
   A session launched from the built-in Codex, Claude Code or Hermes of an earlier
   release is adoptable when the official package that serves its runtime id is
   installed and adopts it, live or stopped (its pin names that package id; the
-  package version may differ). Resume and fork then run through the package.
+  package version may differ). Resume then runs through the package.
   A stopped session launched from an official package is
   `adoptable_by_newer_package` when a strictly newer version of the same
   package adopts it. The `detail` names both versions. See "Stopped sessions on
@@ -728,7 +733,7 @@ the upgrade is not what ends it.
   this repair and judges a rollback. `runtime_source_not_served` means the session's launch pin names a
   runtime source the new binary does not serve and no installed package adopts:
   a built-in runtime it does not ship, or a package digest that is not
-  installed. Resume and fork resolve exactly the pinned source, so nothing
+  installed. Resume resolves exactly the pinned source, so nothing
   else stands in and no command rebinds the session. Finish the work in the
   live session, then continue in a new one with `pohunek session new --agent
   <runtime>` (the `detail` names the runtime), or accept the loss. When the
@@ -836,17 +841,17 @@ rerun, or pass `--accept-runtime-loss` to accept that a session judged that way
 may lose its recovery. Without stopped sessions the upgrade proceeds with the
 warning.
 
-Sessions whose runtime has ended but that keep native resume or fork are judged
+Sessions whose runtime has ended but that keep native resume are judged
 by the same rules and listed under stopped sessions (`stopped_sessions` in the
 `--json` report, and a `stopped` section in the text output). A stopped session
-that would lose its resume or fork is at risk and needs `--accept-runtime-loss`
+that would lose its resume is at risk and needs `--accept-runtime-loss`
 like a live one.
 
 An owner-requested stop or removal is not a runtime-adoption loss, even when
 the runtime is still alive: the new daemon finishes the existing intent. The
 preflight remains read-only and does not relax process-identity, unreadable
 evidence or foreign-process checks. A stop still retains native recovery, so
-its resume or fork is judged separately and can remain at risk. A removal
+its resume is judged separately and can remain at risk. A removal
 keeps no recovery to preserve. Finishing the intent itself is reported with
 the non-blocking `adoptable` verdict and `stop_or_removal_intent_pending` code.
 
@@ -1028,7 +1033,7 @@ profile link names the store path of that generation. After a Nix profile update
 the entry still holds the old generation, and a runtime found there can be below
 the range the release requires although the profile now provides a current one.
 The refusal is `service_upgrade_sessions_at_risk` and offers
-`--accept-runtime-loss`, which would drop resume and fork for the listed
+`--accept-runtime-loss`, which would drop resume for the listed
 sessions.
 
 On macOS, where the install discovers the path through your login shell, the
@@ -1048,7 +1053,7 @@ path. Only the daemon restarts; worker jobs keep running, and live sessions
 keep their runtime unless the new daemon would not adopt them: the command
 takes the same adoption verdict as an upgrade and refuses with
 `service_upgrade_sessions_at_risk` before changing anything. Do not use
-`--accept-runtime-loss` for this cause, since it would drop resume and fork for
+`--accept-runtime-loss` for this cause, since it would drop resume for
 the listed sessions although the runtime is current; on `refresh-path` it
 records nothing. `--dry-run` shows the
 difference and the verdict without a lock. A failure after the write rolls the
@@ -1116,7 +1121,7 @@ settings except `search_path` under `[environment]`, and rerun the upgrade.
 ### Stopped sessions on an older official package version
 
 A stopped session launched from an official package is pinned to that package's
-digest. On resume or fork, a strictly newer version of the same package adopts
+digest. On resume, a strictly newer version of the same package adopts
 it, so a release that widens a package's supported agent range also reaches
 sessions launched before it. All of these must hold:
 - both versions are official (recorded from the signed catalog) and serve the
@@ -1126,8 +1131,7 @@ sessions launched before it. All of these must hold:
 - the older version is still installed, and the newer one declares the same
   integration handler, hook schema and native reference check;
 - the newer version honors the launch the session froze: the same reference
-  kind, the same assigned reference strategy, and fork support when the frozen
-  launch forks;
+  kind and the same assigned reference strategy;
 - for a session launched from a host profile, the profile now pins the newer
   version (the upgrade repins it, see above). A profile still pinned to the
   older version keeps the session on it.
@@ -1142,7 +1146,7 @@ runtime/packages/pi.tar.zst --catalog runtime/runtime-catalog.json --yes`
 command. A disabled one is not changed either, and its gap names
 `pohunek plugin enable pohunek.runtime.pi --digest <digest>` instead. After the update `pohunek plugin profile migrate <name> --yes` moves a Pi
 profile. A selected Pi version newer than the release's is kept. Its stopped
-sessions are adopted on their next resume or fork. A session
+sessions are adopted on their next resume. A session
 launched as the bare `pi` runtime follows the selected version.
 
 A newer version that fails one of these checks does not break the session.
@@ -1352,7 +1356,7 @@ step or that must move its sessions before the upgrade.
 
 A session records the runtime source it was launched from: a built-in runtime
 compiled into the daemon, or the digest of an installed runtime package.
-Resume and fork relaunch exactly that source. A release that does not serve it
+Resume relaunches exactly that source. A release that does not serve it
 and has no installed package adopting it adopts the live worker but reports the
 session as `would lose recovery` with `runtime_source_not_served`. To keep native
 recovery across an upgrade to a release that does not serve the built-in Claude
@@ -1375,7 +1379,7 @@ the preflight reports them as `adoptable`:
    --yes` pins each to the selected package digest.
 3. Start new sessions for the work. They are pinned to the package digest.
    Sessions launched from the built-in are adopted by the installed package,
-   live or stopped, and keep resume and fork through it when the package honors
+   live or stopped, and keep resume through it when the package honors
    their recovery contract. Finish the work in a session the package cannot
    honor before the upgrade, or accept losing its native recovery.
 
@@ -1386,7 +1390,7 @@ the preflight reports them as `adoptable`:
    attach, resize, rename, metadata), whether or not it could resume
    (`runtime_builtin_removed`; the preflight reports it at risk and its detail
    says so). Installing the package in step 1 keeps such a session usable after
-   the upgrade, and resume and fork run through the package when it honors the
+   the upgrade, and resume runs through the package when it honors the
    recovery contract. No release
    up to 0.34.x ships the Hermes package, so step 1 has no Hermes package to
    install: finish or stop built-in Hermes sessions before the upgrade, or
@@ -1404,7 +1408,7 @@ the preflight reports them as `adoptable`:
 
 A later `service upgrade` installs the newer release's package. It repins the
 profiles pinned to an older version of it, and stopped sessions move to the
-newer version on their next resume or fork (see "Official runtime packages
+newer version on their next resume (see "Official runtime packages
 during an upgrade"). Outside an upgrade, `pohunek plugin update <package>
 <archive> --catalog <catalog> --yes` with a newer release's archive installs and
 selects its version for new launches. A profile moves to it only through

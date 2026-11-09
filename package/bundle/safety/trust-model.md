@@ -109,7 +109,7 @@ The assistant must:
 - Preserve paired `origin_session_id`/`origin_daemon_id` request markers on
   ordinary, subscription, and dedicated SDK connections. The daemon uses them
   to deny exactly `session.stop`, `session.resume`, `session.remove`,
-  `session.remove_accepting_unconfirmed`, `session.fork`, `session.resize`,
+  `session.remove_accepting_unconfirmed`, `session.resize`,
   `session.set_metadata`, `session.rename`, and `session.input` when they target the session hosting the caller. Do not strip
   or forge them to bypass `plugin_self_target_denied`. This is a narrow
   confused-deputy guard within the owner trust boundary, not per-session
@@ -141,22 +141,8 @@ The assistant must:
   raw attach bytes. Use only the installed typed tool surface, an explicit host
   allowlist, and the selected `read_only`, `manage`, or `full` access mode.
   The plugin policy is an owner-private delegated-tool guardrail, not a
-  same-user sandbox; the daemon's exact nine-method origin-session denial is
+  same-user sandbox; the daemon's exact eight-method origin-session denial is
   authoritative. Ask a human to attach when typed model control is insufficient.
-
-- Treat a workflow plugin as owner code with the owner's full authority. Its
-  archive digest proves which bytes the owner approved, not what they do; the
-  plugin can read the owner's files and use every public owner API, as any
-  same-UID process can. Show the owner the review `pohunek workflow install`
-  prints, pass `--yes` only after the owner approved it, and never describe a
-  plugin as sandboxed. `pohunek workflow run` forwards the complete
-  `POHUNEK_SESSION_ID`/`POHUNEK_DAEMON_ID` pair to the action, so an action run
-  from inside a managed session is still refused `plugin_self_target_denied`
-  against that session. Never unset or change either marker to get around
-  it; a single marker refuses the run with `workflow_origin_incomplete`, and
-  the fix is to restore the missing marker, not to drop the other. Its environment
-  holds no `PATH`, token or worker variable, and its run log holds no argv,
-  environment, context or output bytes.
 
 The assistant may write host or repo configuration when that is the requested
 task, but it must stay inside the user's requested scope and respect the
@@ -180,33 +166,14 @@ and world write stay refused; see
 
 ## Accepted team-relay boundary
 
-The [optional team relay](../concepts/team-relay.md) has an implemented reduced
-foundation: PostgreSQL-backed fencing and recovery, protected local
-provisioning, generic OIDC authentication, bounded HTTPS account and credential
-lifecycle, provider-neutral account linking, and a native HTTPS/keyring CLI. Do
-not invent host-link, routing, attach, team-administration,
-provider-verification, or team browser commands, configuration keys, protocol
-fields, or recovery steps.
+The [optional team relay](../concepts/team-relay.md) lives in its own
+repository and ships no surface in this build. Do not invent relay commands,
+configuration keys, protocol fields, or recovery steps.
 Current protocol-v4 local, overlay, and Bun browser paths remain one owner trust
-domain and remain supported alongside the foundation. The relay has no local
-mode. Owner and team browser surfaces must not exchange credentials, state, or
+domain. The relay has no local mode. Owner and team browser surfaces must not exchange credentials, state, or
 silently fall back between their explicit origins and API adapters.
 
-[Account linking](../concepts/team-relay.md) is an authority change, so treat it
-with the same care as a credential. A relay identity is exactly the issuer plus
-the immutable subject; never treat an email address, display name, or any other
-provider profile attribute as proof that two accounts are the same person. A
-link requires both the current relay actor and the new identity to prove
-themselves in one audited transaction, and it is completable only through the
-channel that opened it. A link or unlink takes effect on current credentials and
-browser sessions immediately: an unlink revokes everything derived from the
-removed identity and cannot be undone by retry, restore, or cached provider
-state. An account always keeps at least one identity. Linking is an HTTPS-only
-relay surface with no CLI subcommand, so do not invent one; and never repeat a
-link transaction's one-use possession value in output, a log, an issue, or a URL.
-
-The implemented foundation authenticates generic OIDC subjects and credentials;
-future relay work must preserve these independent authorization responsibilities:
+Relay work must preserve these independent authorization responsibilities:
 
 - The relay authenticates and authorizes human principals, service accounts,
   teams, groups, roles, and session ACLs.

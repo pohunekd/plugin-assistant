@@ -11,7 +11,7 @@ intents: [setup, project, update, debug, help]
 
 The Universal Pohunek Assistant is designed as one capable coding-agent session,
 not as a separate runtime or a set of specialized agents. The launch command
-materializes a version-matched knowledge bundle, writes a launch snapshot
+resolves the knowledge bundle of the assistant context package, writes a launch snapshot
 (launch metadata only: no live state and no redaction), builds a short
 navigational prompt, and starts a normal PTY-backed session with initial input.
 Like every managed live session, that PTY belongs to its isolated
@@ -23,21 +23,13 @@ the snapshot file, and the [source map](../assistant/source-map.md); it does not
 inline the whole corpus. That keeps prompt size bounded and lets the same
 Markdown serve humans and agents.
 
-Materialization publishes the bundle only after its files and directories have
-been synchronized, then synchronizes the cache directory after the atomic rename.
-A synchronization error fails the operation; retrying completes the publication
-before it reports success. Each attempt also synchronizes the cache ancestry that
-may have been created by an earlier failed attempt, including when reusing a
-complete bundle. An interrupted, incomplete version is moved aside
-inside the private cache and rebuilt. Symbolic links and unsafe ownership or
-permissions are refused rather than followed or repaired outside that cache.
-
-The daemon and local assistant serialize publication and cache cleanup with the
-same materialization lock. Cleanup preserves active temporary extractions and
-collects abandoned ones after their ownership lock is released. Legacy temporary
-directories without an ownership lock are retained for at least a day before
-cleanup under the shared lock; a live legacy owner is retained conservatively.
-Cleanup is best effort and does not turn a successful publication into a failure.
+The daemon resolves the bundle from the selected, enabled assistant context
+package (`pohunek.context.assistant`) and re-verifies the package root on every
+launch. A launch without the package, or with one that is disabled, unselected or
+modified, fails with `assistant_package_missing` and a remedy that names the
+step to take. The launch snapshot goes into an owner-private directory under the
+daemon's runtime directory; a launch under a request id owns its directory, so a
+repeat keeps the first snapshot.
 
 The planned assistant command surface uses one implementation with intent
 filters: setup, project, update, debug, and help. Intent changes the initial
@@ -45,8 +37,9 @@ table of contents and first-step steering, but the concepts and safety model are
 shared.
 
 Local launches can bootstrap or verify the daemon before starting a session.
-Remote launches preserve the existing remote session safety model and require a
-knowledge bundle materialized on the host that runs the agent.
+Remote launches preserve the existing remote session safety model and read the
+bundle from the assistant context package installed on the host that runs the
+agent.
 
 All shipped clients use the same public protocol v4. Each request advertises an
 inclusive `minimum`/`maximum` version range; the first response selects the
@@ -153,12 +146,7 @@ by the same lifecycle engine on both targets: systemd transient units
 `pohunek-<ns>-sessions.slice`) on Linux, and launchd jobs
 (`io.github.zajca.pohunek.<ns>.worker.<session-id>.<generation>`) whose
 definitions stay in a private state directory on macOS. The daemon is the
-login service of pohunek itself (`pohunek service install`); the only other
-login units are the jobs and services of enabled workflow plugins
-(`pohunek-<ns>-wf-*` units, `io.github.zajca.pohunek.<ns>.wf.*` agents), which
-run the CLI's `pohunek workflow __exec` trampoline, never the daemon, and which
-worker discovery never adopts (see the
-[workflow plugins guide](../guides/workflow-plugins.md#jobs-and-services)).
+login service of pohunek itself (`pohunek service install`).
 `<ns>` is derived from the user ID
 and the canonical state and runtime roots, so separate installations never
 adopt or retire each other's jobs. Workers live for the login session: closing
@@ -183,28 +171,15 @@ previous version), and the core
 crates they link are a pinned, not a stable, API. Issue and PR providers live
 only in `zajca/pohunek-work`.
 
-Pohunek has an [optional team-relay design](team-relay.md) with an implemented
-reduced foundation. The PostgreSQL-backed relay provides fencing, recovery,
-protected initial provisioning, generic OIDC browser/device authentication,
-bounded HTTPS account and credential lifecycle, account linking, and Google and
-GitHub team admission with bounded revalidation. Standalone and direct overlay
-modes remain independent. Host links, `HostShare`, session origin, routing,
-attach, team administration, and the team WebUI remain deferred. The relay has
-no local mode; its future team WebUI and any owner-path browser client use
-separate explicit API adapters, credentials, state, and origins.
+The optional team relay lives in its own repository ([team-relay](team-relay.md));
+this build ships no relay surface. Standalone and direct overlay modes remain
+independent. Host links, `HostShare`, session origin, routing, attach, team
+administration, and the team WebUI remain deferred. The relay has no local
+mode; its future team WebUI and any owner-path browser client use separate
+explicit API adapters, credentials, state, and origins.
 
-Protocol v4 and the typed host/team API will arrive only through their linked
-implementation issues. The current bounded foundation API and native relay CLI
-do not imply a host or team surface. Assistants must not infer future commands
-or fields from the RFC; verify currently available behavior in
-`docs/public-api.md` through the [source map](../assistant/source-map.md).
-
-The planned relay contract is normative only in the RFC sections on identity,
-recovery, scheduling, resources, snapshots, catalog, audit, and dependencies.
-Its implementation path is completed reduced #85 → #107/#108/#92 → complete
-#72 → #70/#82/#83/#84/#71 → #86 and #87, then
-post-release #73/#88. The first relay release trusts collaborators at the host
-Unix-account boundary; its ACLs do not provide workload isolation.
+Assistants must not infer relay commands or fields; verify currently available
+behavior in `docs/public-api.md` through the [source map](../assistant/source-map.md).
 
 Related concepts:
 

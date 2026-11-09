@@ -10,10 +10,9 @@ intents: [setup, project, debug, help]
 # Remote Hosts
 
 This guide documents the current protocol-v4 owner path over configured
-overlays. The [optional team relay](../concepts/team-relay.md) has an
-implemented authentication and credential foundation, including native `pohunek
-relay` commands, but it provides no remote-host enrollment, routing, attach, or
-team client. Those commands do not alter the owner path described here.
+overlays. The [optional team relay](../concepts/team-relay.md) lives in its own
+repository and provides no remote-host enrollment, routing, attach, or
+team client; it does not alter the owner path described here.
 
 ## Overlay configuration
 
@@ -163,9 +162,9 @@ and retention prune with `--all-hosts`. Single-record actions use the target
 host: `host/id` overrides `--host`, while a bare id targets the selected
 `--host` or local daemon.
 
-The assistant design keeps the same boundary. A remote assistant must use a
-knowledge bundle materialized on the remote host, version-matched to the remote
-binary, and readable by the selected remote agent profile.
+The assistant design keeps the same boundary. A remote assistant must use the
+bundle of the assistant context package installed on the remote host, and that
+bundle must be readable by the selected remote agent profile.
 
 The Hermes operator uses the same direct overlay path but never performs host
 discovery on a model's behalf. Its policy allows only explicitly listed hosts;
@@ -268,9 +267,6 @@ attach streams to one relay. Independently
 approved `HostShare` records can expose bounded project, profile, operation, and
 resource capacity to multiple teams. Local and direct-overlay sessions remain
 owner-only and never appear through the relay; only sessions created through a
-share are eligible. The implemented foundation already provides generic OIDC
-device flow and browser Authorization Code with PKCE for its credential
-lifecycle, with no loopback fallback. It does not authorize host enrollment or
-relay-created sessions. Until the host-link, routing, and team-client issues
-linked from the [team-relay concept](../concepts/team-relay.md) land, use only
-the owner commands documented above for remote hosts.
+share are eligible. Until the host-link, routing, and team-client work described
+in the relay repository (see the [team-relay concept](../concepts/team-relay.md))
+lands, use only the owner commands documented above for remote hosts.

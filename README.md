@@ -15,12 +15,22 @@ bundle through `assistant.materialize`; the daemon serves the files of the
 selected, enabled package after verifying its root against the archive digest.
 Without this package a launch fails with `assistant_package_missing`.
 
+## Release
+
+A tag `vX.Y.Z` that equals the version in `package/runtime.toml` runs
+`.github/workflows/release.yml`. It calls the reusable `plugin-release.yml` of the
+pohunek core tag named in the workflow, which builds the archive with that tag's
+`xtask plugin build`, attests it, and publishes `pohunek.context.assistant-X.Y.Z.tar.zst`
+with `SHA256SUMS` as a release of this repository. The package is published right
+after the pohunek release it belongs to, from the core tag of that release; it
+needs pohunek 0.41.0 or newer.
+
 ## Build and install
 
 ```sh
 scripts/assemble-bundle /path/to/pohunek-checkout
-cargo xtask package build package --output assistant.tar.zst   # in the pohunek checkout
-pohunek plugin install assistant.tar.zst --sha256 <digest printed by the build> --yes
+cargo xtask plugin build --dir package --output-dir <existing dir>   # in the pohunek checkout
+pohunek plugin install <dir>/pohunek.context.assistant-<version>.tar.zst --sha256 <digest printed by the build> --yes
 ```
 
 `package/runtime.toml` carries the package version; it follows the pohunek
