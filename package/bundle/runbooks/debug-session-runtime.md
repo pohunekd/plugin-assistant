@@ -1,0 +1,715 @@
+---
+type: Runbook
+id: runbook/debug-session-runtime
+title: Debug a durable session runtime
+description: Diagnose worker reconnection, runtime loss, identity conflicts, and first worker-aware migration.
+source_kind: manual
+intents: [debug, setup, update, help]
+since: 0.19.0
+---
+
+# Debug a Durable Session Runtime
+
+Use this runbook when a session survives in the list but cannot attach, when a
+daemon restart closed an attach terminal, or when an update reports a worker
+problem.
+
+Start with public, non-destructive inspection:
+
+1. Run `pohunek health --json` and wait for the replacement daemon to become
+   ready. Readiness follows worker discovery and reconciliation.
+2. Run `pohunek session inspect <target> --json`.
+3. Record `runtime.state`, `runtime.worker_id`, `runtime.worker_instance_id`,
+   decimal-string `runtime.runtime_generation`, `runtime.last_connected_at`,
+   and `runtime.loss_reason`.
+4. On the session's host, run `pohunek service status --json`. Each entry in
+   `workers` is one worker generation (`session_id`, `generation`,
+   `service_id`, `state`, `pid`, and the proven executable and arguments). A
+   session has at most one worker generation. To inspect the native job without
+   changing it, derive its name from the namespace and generation: on Linux
+   `systemctl --user status pohunek-<ns>-worker-<session-id>-<generation>.service`;
+   on macOS `launchctl print gui/$(id -u)/io.github.zajca.pohunek.<ns>.worker.<session-id>.<generation>`
+   (read its exit status: `0` loaded, `113` absent; the printed text is
+   informational only).
+5. Inspect daemon and worker structured logs under
+   `~/.local/state/pohunek/logs/`. Do not copy prompt, input, or raw terminal
+   content into reports. `pohunekd.jsonl` plus seven rotations retain at most
+   256 MiB; `pohunek-session-<session-id>.jsonl` plus three rotations retain at
+   most 16 MiB across all worker generations for that session.
+   `pohunek-hooks.jsonl` plus one rotation (at most 2 MiB) is the hook failure
+   trace of every session on the host (see below).
+
+A `session.new` or fork that fails before any runtime exists reports one of
+these codes instead of a runtime state:
+
+- `worker_socket_path_invalid`: the worker socket below the daemon's runtime
+  directory could never be bound. A worker first binds a staged name
+  (`.s` plus 16 hexadecimal characters) beside `control.sock`, so the message
+  names that longer path and the platform limit (107 bytes on Linux, 103 on
+  macOS). The create is refused before anything is written or launched;
+  restart `pohunekd` with a shorter `XDG_RUNTIME_DIR`.
+- `worker_exited_before_ready`: the worker job ended before it accepted
+  connections. The daemon stops waiting as soon as the service manager shows
+  the job ended, instead of waiting for the worker connect deadline, and
+  retires the job. The message carries the worker's exit status in
+  `--dev-subprocess` mode and the job's final state otherwise. In
+  `--dev-subprocess` mode the worker's stderr (its first 8 KiB) is logged to
+  `pohunekd.jsonl` as a `worker.stderr.captured` event; for a native job read
+  the systemd journal or the launchd job log instead.
+
+Every time the daemon classifies a session runtime `conflict`, `lost`,
+`reconnecting`, or `incompatible`, at startup or while it runs, `pohunekd`
+logs exactly one WARN with the message template `session runtime is
+{runtime.state}: {reason}` (the braces name the fields that carry the values)
+and the fields `session_id`, `worker_id` (`none` when the record names no
+worker), `runtime.state`, `reason`, and `detail` when there is evidence text,
+for example the control-connection error behind `worker_connection_lost`.
+Search `~/.local/state/pohunek/logs/pohunekd.jsonl` for `session runtime is`
+and filter by `session_id`. A re-check that finds the same state and reason
+logs nothing more and emits no new event; a runtime whose worker connection
+dropped logs `worker_connection_lost` (`reconnecting`) once and a second WARN
+when it is classified again, for example `lost` with `runtime_lost`.
+
+When `pohunek session inspect <target>` shows a subagent row that disagrees with
+the provider, read the session's worker log
+(`pohunek-session-<session-id>.jsonl`). The worker logs every admitted subagent
+claim it ignores as `worker.subagent.claim.ignored` and every claim it refuses
+as `worker.subagent.claim.refused`, with `subagent.action`, `subagent.id`, the
+reported and recorded sequences, and a `subagent.reason` code:
+`duplicate_start` (a newer start for a child that is already running),
+`stop_without_start` (a Claude stop with no recorded start, such as Claude's
+prompt-suggestion helper after every main turn), `stale_sequence` (a claim not
+newer than the recorded one, or a start not newer than a remembered Claude
+stop without a start) and `not_running` (a newer stop for a terminal Claude or Muse child; a Codex
+child records it as a completed turn and logs nothing) at INFO,
+and `capacity` (a start refused because the provider's running-child limit of 64 is full) at
+WARN. A child's phase follows the highest-sequence claim the worker admitted
+for it, for every provider: an ignored `duplicate_start` or `not_running`
+claim newer than the record still advances the record's journaled sequence,
+so a later `stale_sequence` line for an older claim of the same child is the
+expected outcome of reordered hooks, not lost state. An inadmissible claim, such as one from the wrong
+process or runtime, is the `worker.identity.rejected` warning with
+`identity.operation` `subagent_start`, `subagent_stop` or `subagent_snapshot`
+(the last also for a Claude task list that breaks a bound).
+
+When a waited `session.input` on a Claude session ends in
+`session_input_timeout` although the prompt reached the agent, check the
+prompt-submit report: the worker logs one `worker.prompt_accepted` INFO event per
+applied report, and a refused one is a `worker.identity.rejected` warning with
+`identity.operation` `prompt_accepted` and the reason (`prompt_reporter_not_launch`
+for a process other than the launch process, `launch_identity_pending` before
+the worker accepted a launch identity, `sequence_stale`, `claim_expired`). No log
+line at all means the hook did not reach the worker: its failure trace line
+has `action` `prompt-submit` (see the hook failure trace below), and a hook
+asset older than integration version 15 registers no `UserPromptSubmit` hook, so
+`pohunek integration status --agent claude` reports it `outdated`; reinstall it.
+
+The worker logs one `worker.identity.answered` INFO event per private
+`identity_report`, from the parsed request to the written response, with
+`identity.accepted`, `identity.delivered` (whether the response write
+succeeded) and the durations `identity.lock_wait_us` (wait for the worker
+state), `identity.persist_us` (the durable journal writes, fsync included) and
+`identity.answer_us` (the whole answer). Compare `identity.answer_us` with the
+reporter's own `elapsed_ms` for the same send (`Reporter.worker_sends` of the
+Hermes hook reporter): a report that missed the hook deadline (0.25 s by
+default, 1.0 s at most) while `identity.answer_us` is small never reached the
+worker's handler in time, and one with a large `identity.persist_us` waited on
+the journal write. The event carries no claim payload or native reference.
+
+At every Claude main-turn end the state hook sends the worker a snapshot of
+Claude's running background tasks. The worker logs one
+`worker.subagent.snapshot.applied` at INFO per admitted snapshot, with
+`subagent.provider`, `subagent.sequence.reported`, and the `subagent.snapshot.*`
+fields `tasks` (tasks in the snapshot), `hosts` (whether the snapshot listed a
+task that can host an unlisted agent, any type except `shell`, `monitor` and
+`MCP task`), and the counts of the reporting process's rows: `listed` (running
+rows the snapshot listed), `terminalized` and `deferred`. Each row it completes
+is a `worker.subagent.reconciled` INFO event with `subagent.provider`,
+`subagent.id`, `subagent.sequence.reported` (the snapshot's),
+`subagent.sequence.recorded` (the row's own sequence, which the completed row
+keeps), and `subagent.reason` `snapshot_absent`: the snapshot omitted a running
+row whose newest listing by the same reporter falls within its current run and
+is older than this snapshot, or another omitted row while no hosting task was
+listed and the reporter's newest snapshot was older than this one and newer
+than the row. The worker keeps only the reporter's newest listing of each row
+and its newest snapshot, so a snapshot older than that evidence, delivered out
+of order, settles nothing from it. A snapshot never reopens a row and never changes a listed row's
+sequence: a listed running row stays `running` with no event and its own
+`SubagentStop` completes it, and a listed terminal row stays terminal (Claude
+often still lists a fast background agent whose stop already arrived; a
+self-woken agent reopens through its own `SubagentStart`).
+
+A non-zero `deferred` count names running rows of the reporting Claude process,
+older than the snapshot, that it neither lists nor proves absent: rows whose
+newest listing by this reporter is missing, outside their current run or not
+older than this snapshot, while `hosts` is true or the reporter's newest
+snapshot is not both older than this one and newer than the row. For example,
+a row started at 10 and listed by snapshot 30, then listed again by a late
+snapshot 20, is deferred by a late empty snapshot 25: the newest listing (30)
+and the newest snapshot (30) are not older than 25. The worker remembers the last snapshot of at most
+`SNAPSHOT_REPORTER_CAPACITY` (16) reporting processes and forgets the least
+recently reporting one first, so a forgotten process's never-listed rows stay
+deferred through the reporter's next snapshot, which only records itself, and
+settle at the earliest on the one after it. They are typically teammates, synchronous
+children of a listed background agent, workflow agents, which Claude does not
+list by agent id, or an agent that started in the main turn that just ended;
+they stay `running` until their own `SubagentStop` or a later snapshot that
+can settle them. A deferred count that persists across many turns is either
+such a child that is still alive or one whose stop was missed; check the agent
+in Claude first. A row whose stop was missed stays `running` until a snapshot
+settles it, and a row whose reporter never ends another main turn stays
+`running` until the runtime ends, when it becomes `lost`. Rows started by
+another process, such as a second Claude in a shell session, are not counted.
+
+The same snapshot also updates the session's background work, which the
+session inspect detail shows beside the subagent rows. The worker logs the
+background snapshot at INFO with four events, none of which carries a label,
+program, command or background item id:
+
+- `worker.background.applied`: the snapshot replaced the background, with
+  `background.revision`, `background.sequence.reported`, `background.items`
+  and `background.kinds`, the item count per kind as `kind=count` pairs
+  (`shell=2 subagent=1`).
+- `worker.background.ignored`: the snapshot did not replace it, with
+  `background.reason` and the reported sequence and item count. `stale_sequence`:
+  a newer background snapshot was already applied, from any process, so the
+  latest sequence wins. `too_many_items`: the list is over
+  `BACKGROUND_MAX_ITEMS` (64) tasks, so the previous background stays.
+- `worker.background.fields_dropped`: optional fields were dropped, with
+  `background.dropped.invalid` (a label or program failed its check, or had
+  the wrong JSON type) and `background.dropped.kind_mismatch` (a field the
+  task's kind does not carry). The rest of the snapshot applied.
+- `worker.background.cleared`: the background was cleared, with
+  `background.reason` `runtime_end`, `release` (the process that reported the
+  snapshot released its session, with a release reason other than `clear`),
+  `agent_changed` (an admitted identity report from another process than the
+  snapshot's reporter), `session_start` (an admitted `startup` or `resume`
+  report from that reporter), or `owner_exited` (the reporting process is no
+  longer running: exited, reaped, a zombie, or its pid now names another process; the inspect path
+  checks it, so the clear follows the exit within one daemon poll, about
+  100 ms).
+
+A release or session-start clear also raises the sequence mark, so a claim the
+reporter began before that clear is `stale_sequence` if it arrives late. An
+`owner_exited` clear does not raise it. The background mark is clamped to the worker's `CLOCK_MONOTONIC` reading, so a
+claim with a sequence ahead of that clock (for example from a runtime package
+with its own clock) can apply, but it cannot lock the background view: the next
+turn end replaces it.
+
+The snapshot belongs to the process that reported it. A nested Claude inside
+the session reports its own snapshot, which replaces the outer one, and its
+release clears it. The outer agent's next turn end restores its own snapshot,
+so an empty background while the outer agent runs no turn is expected after a
+nested owner has exited. A `clear` release or a `compact` session of the owner
+keeps the background, and so does a `clear` session that follows a `clear`
+release. When a turn that listed tasks is missing from the background, look
+for one of these events in the log, or for a Claude main turn that never
+ended, because the snapshot is sent at the end of each turn.
+
+When a Claude main turn ends without a `snapshot.applied` event, check in this
+order: a `worker.identity.rejected` warning with `identity.operation`
+`subagent_snapshot` (the worker refused the snapshot, for example a task list
+over a bound); the hook-side cases in which no snapshot is sent (a missing or
+invalid task list, more than 256 tasks, an input over 1 MiB, or a `Stop` with a
+non-empty `agent_id`; each is a `no_snapshot` or `input_*` line in the hook
+failure trace described below); a Claude hook asset older than integration version 12,
+which has no `Stop` state hook (`pohunek integration status --agent claude`
+reports it `outdated`; reinstall it); and a session worker started by a release
+without the snapshot claim, which refuses it.
+
+A claim, snapshot or identity report that never reached the worker log (no
+`claim.ignored`, `claim.refused`, `snapshot.applied`, `identity.answered` or
+`identity.rejected` line) was dropped by the state hook itself, which always exits 0 so it never
+breaks the provider. The hook records why in the hook failure trace,
+`~/.local/state/pohunek/logs/pohunek-hooks.jsonl` (the pohunek log directory;
+the worker passes the path to every managed child as `POHUNEK_HOOK_TRACE_PATH`
+and the rotation size as `POHUNEK_HOOK_TRACE_MAX_BYTES`). One file serves
+every session of the host: filter it by `session`, for example
+`jq -c 'select(.session == "<session-id>")' ~/.local/state/pohunek/logs/pohunek-hooks.jsonl`,
+and match `ts` against the worker log. The file is owner-private (`0600`) and
+rotates at 1 MiB into a single `pohunek-hooks.jsonl.1`, so the trace holds at
+most 2 MiB; read both files for the full window. Each line is one JSON object
+of at most 512 bytes with `ts` (RFC 3339, UTC), `session` (the Pohunek session
+id), `provider`, `action` (the hook action, such as `subagent-start` or
+`stop`), `reason` and an optional `detail` (a fixed short code, often an errno
+name). A line never carries the provider payload, ids taken from the input
+(agent, task or native session ids), task data, paths or environment values.
+The `reason` codes:
+
+- `input_too_large`: the input exceeded 64 KiB (1 MiB for the Claude `stop`
+  action);
+- `input_invalid`: `detail` `empty`, `not_json`, `not_utf8`, `too_deep`,
+  `not_object`, a read errno, `agent_id_missing` (a subagent action without an
+  agent id) or `session_id_missing` (a `session` action without a native
+  session id);
+- `no_snapshot`: the Claude `stop` action sent no snapshot, with `detail`
+  `subagent_stop` (a `Stop` with a non-empty `agent_id`), `tasks_missing`,
+  `tasks_invalid` or `tasks_over_bound` (more than 256 tasks);
+- `action_invalid`: a defensive code the managed hook never writes, because
+  its shell part exits on an unknown action before the session handshake;
+- `worker_socket_missing` (`detail` `unset`: no worker socket in the
+  environment; `ENOENT`: no socket at `POHUNEK_WORKER_SOCKET_PATH`),
+  `worker_instance_missing`,
+  `agent_pid_invalid` and `agent_identity_unavailable` (the agent's process
+  start identity could not be read): the hook could not build or route the
+  claim;
+- `worker_unreachable` (connect failed, `detail` the errno),
+  `worker_timeout` (no answer within the 0.5 s socket timeout),
+  `worker_closed` (no usable answer line; `detail` an errno, `empty` or
+  `malformed`);
+  A hook timeout means no answer arrived within the deadline, not that the
+  claim was rejected, since the worker may still apply it.
+- `worker_refused`: the worker answered without `ok: true`; match it with the
+  `worker.identity.rejected` or `worker.subagent.claim.refused` line of the
+  same moment in the worker log;
+- `hook_started` and `hook_finished` (the `session` action only): a
+  `hook_started` with no later `hook_finished` for the session is a
+  `SessionStart` run the agent killed after the interpreter began, so the
+  session has no native reference until the next turn ends (the Claude `stop`
+  action repeats the identity report) or never, on a hook older than integration
+  version 16. A run killed while the interpreter starts leaves no line but a
+  `pohunek-hooks.jsonl.start.<suffix>` file beside the trace, holding the session
+  id (the first `python3` start through the Xcode shim can outlast the hook
+  timeout; `ls` the log directory for `pohunek-hooks.jsonl.start.*`). The
+  interpreter of a later `session` run removes markers older than an hour;
+- `daemon_socket_missing`, `daemon_unreachable`, `daemon_timeout`,
+  `daemon_closed`, `daemon_refused` (the daemon answered an error) and
+  `daemon_protocol_invalid` (no worker socket and no usable
+  `POHUNEK_PROTOCOL_VERSION`): the daemon-socket fallback of the `session`
+  action (and the Claude `release` action) failed; match them in
+  `pohunekd.jsonl`.
+
+Lines carry no run id: a `session` or `release` report the worker did not
+accept and the daemon fallback then delivered leaves only the `worker_*` line,
+and so does one for which no daemon route was configured, so check
+`pohunekd.jsonl` around the same `ts` before concluding either. Only exits
+after the hook established that it runs in a Pohunek session (`POHUNEK_ENV=1`
+and a session id) and started `python3` are traced. An empty trace for a
+session whose claims are missing therefore means the hook did not run there,
+`python3` is not on the hook's `PATH` (no state hook of that session reports
+anything then), the trace lock stayed contended (the hook tries it at most
+5 times, 5 ms apart, then drops that run's lines), the trace variables were
+missing (a session worker of a release without the trace sets neither), or the
+installed hook is older than integration version 13 (`pohunek integration
+status` reports it `outdated`). Tracing never changes a hook's exit code or
+output, and a report delivered on its first route writes no line.
+
+Interpret runtime states as follows:
+
+- `live`: the daemon has the current worker controller lease. Attach should use
+  the existing runtime.
+- `reconnecting`: a known worker is still being validated or adopted. Do not
+  start native recovery or restart the worker. Reason
+  `runtime_supervision_unavailable` means the service manager (systemd user
+  manager or launchd) could not be inspected, or could not retire the job of a
+  worker generation that is proven ended; nothing was killed and
+  reconciliation retries on its own (after 1 s, doubling to at most 60 s). A
+  session whose removal was interrupted (for example the daemon stopped mid
+  `session rm`) also shows this reason while its removal waits for the job to
+  be retired or its cleanup to succeed; the retry then finishes the removal
+  and the session disappears. A session whose stop was interrupted shows this
+  reason too while its stop replay fails (its worker answers but returns no
+  terminal outcome yet); the retry replays the stop until the worker commits
+  it, and the session then reads `stopped`. Reason
+  `create_compensation_pending` marks a `session new` that failed after
+  binding a worktree and whose runtime is proven ended, but whose checkout,
+  worktree binding, or create record could not be removed yet (typically a
+  worktree locked with `git worktree lock`, or a store write failure). Nothing
+  of it runs; the same retry repeats the removal, so fix the cause (for
+  example `git worktree unlock <path>`) and the session disappears with
+  `session_removed` on the next pass, without a daemon restart.
+- `terminal`: the worker observed child exit and the logical outcome is being
+  retained or has been imported.
+- `lost`: no live PTY generation remains. `session inspect --json` shows
+  `runtime.exit` when the service manager still held the failed worker job:
+  `cause` `oom_kill` means the worker unit was killed for memory, by the kernel
+  at its memory limit or by `systemd-oomd` under memory pressure (`oom_killer`
+  below says which; the signal only says how the worker process was stopped),
+  `signal` and `exit_code` carry the signal number or exit code, and `other` is any result
+  the daemon does not map. For `oom_kill`, `oom_killer` is `kernel` or
+  `systemd_oomd` when the manager's counters name one killer, and
+  `memory_peak_bytes` and `ended_at` show the unit's peak memory and end time.
+  `exit` is absent after a host restart and on macOS. Without `exit`,
+  `runtime.loss_cause` says `user_manager_lost` when the user service manager
+  that held the worker is gone (look at `journalctl -u user@<uid>.service` in the
+  system journal for its memory verdict) or `host_restarted` after a reboot; no
+  `loss_cause` means the journal proved neither.
+  When the daemon observed the end
+  (the worker job ended and was retired, a host restart) the session shows
+  `failed` with no activity; a loss without that proof (reason
+  `runtime_lost_cleanup_unconfirmed`, a record that names no generation, a recovery whose previous worker still answers, an unreachable
+  socket) keeps the session state and shows no activity. The logical record is
+  intentionally retained; explicit native recovery is possible only with a valid launch
+  recovery reference. Reason `runtime_lost` means the worker job ended while its
+  journal still said live, and the ownership-marker sweep removed that
+  generation's leftover processes (or was blocked only by processes with
+  unreadable markers while `loss_cause` is `user_manager_lost`: the user
+  manager that held the worker is gone, and so are the processes of its tree). `runtime_lost_cleanup_unconfirmed` means the
+  same, but the sweep could not confirm that every marked process ended,
+  for example because a worker child carries the session's `POHUNEK_SESSION_ID`
+  and `POHUNEK_WORKER_ID` but no `POHUNEK_WORKER_INSTANCE_ID` (a child of a
+  worker before 0.33.1; a daemon-run lifecycle hook has no worker marker and
+  is ignored; the
+  sweep never signals it, and the `session.runtime.sweep_unmarked` WARN in
+  `pohunekd.jsonl` names it by pid);
+  `session.resume` retries the marker sweep against the exact journaled runtime;
+  it refuses with `runtime_supervision_ambiguous` and a recovery hint until
+  cleanup is confirmed. Inspect and end any remaining marked processes, then
+  retry. If the recorded runtime cannot be matched to its journal, recovery
+  remains refused. A lost
+  session without a journal for its generation reports `worker_unavailable`;
+  its job is retired, but no process is swept, so check `ps` for leftovers.
+  A session is reported `lost` only after the service manager retired its job;
+  until then it stays `reconnecting` with `runtime_supervision_unavailable`.
+  The same classification runs when a worker dies while the daemon is running:
+  a proven crash is reported `lost` immediately, and a worker that stays
+  unreachable is classified after the worker connect deadline (`conflict`
+  while its job still runs, `reconnecting` while the manager is unavailable).
+  A socket that accepts but never answers counts as unreachable: each connect
+  attempt ends at the same deadline.
+- A stale `control.sock` that refuses connections is only a failed endpoint
+  probe. If the recorded generation's native job is absent and its journaled
+  worker is proven gone, the daemon sweeps processes bearing that runtime's
+  ownership marker before reporting `lost` and allowing `session resume`.
+  A still-present job with a silent socket stays `conflict`; an unreadable
+  journal stays ambiguous, while an unconfirmed sweep reports
+  `lost` / `runtime_lost_cleanup_unconfirmed` and requires process inspection
+  before recovery. Inspect the session state and service status together rather
+  than treating the socket pathname or inventory reason as proof by itself.
+
+A terminal or lost hook runtime without a trusted native reference refuses
+`session.resume` before launching anything. `runtime/native_identity_missing`
+means its own generation journal has no native claim;
+`runtime/native_identity_unverified` means it has a claim but no verified
+launch-process binding. `runtime/native_identity_evidence_unavailable` means
+the durable session record or exact generation journal cannot be read, the
+journal is absent or ambiguous, or its worker id or instance does not match the
+record. Preserve both records for diagnosis. A foreign process claim keeps the
+existing typed process-identity reason and cannot replace the stored native
+reference.
+`runtime/native_identity_uncertain` means the generation journal carries a
+newer conversation switch that this daemon cannot verify: the journal names a
+different conversation than the persisted one and no newer accepted report
+covers it. Native recovery is unavailable with the older verified target
+intact, because the daemon cannot tell which conversation the agent last used.
+Resume the newer conversation in a fresh session with
+`<agent> --resume <resolved-id>` or clear the journal discrepancy in the
+session's own generation before retrying; never delete the journal.
+For Claude, `runtime/agent_native_reference_missing` on resume or fork means
+the selected conversation's regular transcript file could not be verified
+under the effective Claude config home. Restore or inspect the transcript tree
+before retrying; the refused operation creates no new worker or fork child.
+`runtime/agent_native_store_relocated` means the agent would keep its
+conversations outside the store its recovery checks (for Pi: `--session-dir`
+in the profile `args`, a `sessionDir` setting, or a relative
+`PI_CODING_AGENT_SESSION_DIR`); nothing was launched. On `session new`, follow
+the `recover` hint: set the named variable in the profile `[env]` to the
+absolute directory, or remove the argument. On resume or fork the launch had
+passed the same refusal, so something changed since: a setting appeared, or
+the variable the launch had is gone (a daemon restart without it, an accepted
+profile edit). Undo that change: remove the setting (or make the settings file
+readable JSON again), or restore the variable to the absolute path the session
+was launched with and pass `--accept-profile-change`; pointing the variable at
+a new directory does not find the conversation.
+`daemon/native_store_check_task_panicked` on `session new`, resume or fork
+means the native reference check itself crashed (on resume and fork it covers
+the whole check, Claude's transcript check included); nothing was launched,
+and the daemon log has the panic.
+
+- `conflict`: multiple or mismatched identities claim the session. Never stop,
+  unlink, or kill either candidate by hand, and the daemon never kills one
+  automatically. Preserve the job, journal, and socket evidence for diagnosis;
+  `pohunek session stop <id>` is the supported exit when it can prove the
+  recorded identity (see below). `runtime_supervision_ambiguous` means the
+  native job is present but its worker socket does not answer and its journal is
+  not terminal, or that its journals or worker socket directory could not be
+  read at all. It is not permanent: the daemon re-checks it in the background
+  (after 1 s, doubling to at most 60 s) without killing anything, adopts the
+  worker when it answers again, and reports `lost` with `runtime_lost` once the
+  job ends and the journaled worker process is gone. A create that was pending
+  when the daemon restarted also shows this reason while its job is watched
+  until the worker initialization deadline; the job is then retired and the
+  unfinished session disappears. `runtime_identity_mismatch` means the job's definition or
+  process does not match the recorded executable, session, or generation.
+  A conflict whose record names a worker generation is watched whatever its
+  reason, while a worker still answers or its job is supervised: adoption
+  reasons (`launch_identity_*`, `active_identity_*`, subagent snapshot
+  rejections, `multiple_worker_candidates`), `runtime_identity_mismatch`, and
+  `runtime_supervision_ambiguous`. The first re-check runs after 1 s and the
+  delay doubles to at most 60 s; a session that newly joins the watch is
+  re-checked after 1 s again, whatever the delay of the others has grown to.
+  Each pass classifies from fresh evidence and never kills: while the evidence holds the session stays `conflict` (no new
+  event or log), a worker that becomes adoptable is adopted `live`, and once
+  the worker is gone and its job has ended the session becomes `lost` with
+  `runtime_lost` (`runtime_lost_cleanup_unconfirmed` when the marked-process
+  sweep is unconfirmed). Every pass probes all worker sockets, not only the
+  session's own: a worker is adopted only while no other socket claims the same
+  session, so a shadow worker keeps the conflict (`multiple_worker_candidates`)
+  until it is gone. A worker that exits in an orderly way and leaves a
+  terminal journal is imported as `terminal`, not `lost`. Not re-checked, and
+  needing the operator: a record that disagrees with its stored resume binding
+  (`resume_binding_*` reasons), a journal-only conflict
+  (`worker_journal_identity_mismatch`, a journal naming another worker than
+  the record), and a record naming no worker generation.
+  A live worker started by the previous release is adopted `live` after the
+  store migration. Its reported launch identity is checked against the stored
+  native recovery binding and fails closed only on a real contradiction: another
+  provider than the session's runtime (`launch_identity_provider_mismatch`), a
+  reference kind that contradicts the binding's launch spec or is stored under
+  the other kind when the binding has no launch spec
+  (`launch_identity_reference_kind_mismatch`), or a reference that differs from
+  the stored one (`launch_identity_reference_mismatch`). A binding the migration
+  could not complete (no launch spec, for example a deleted profile or a profile
+  without native resume; the session carries a `native_recovery` warning) does
+  not block adoption: the worker is adopted `live` and `screen`, `input`, and
+  `stop` work; only resume and fork stay unavailable.
+  `pohunek session stop <id>` on a `conflict` stops the supervised job by the
+  identity the record names instead of refusing. Before anything is written it
+  proves that the journal of the recorded generation names the recorded worker
+  and that the job the service manager shows under that generation's service id
+  is that worker's (executable, `--session-id` and `--worker-generation`
+  arguments, and main process match the journal). It refuses with
+  `session_runtime_conflict` when the record names no generation or worker,
+  `runtime_identity_mismatch` when no journal of the generation names the
+  recorded worker or the job is not that worker's,
+  `runtime_supervision_ambiguous` when the journals are unreadable or no job holds
+  the recorded worker process while it still runs (nothing could stop it), and
+  `runtime_supervision_unavailable` when the job cannot be inspected. After the
+  proof it persists the stop intent, retires the job of the exact generation
+  (which ends the worker and its child), requires every worker journaled for
+  the generation to be gone, and sweeps the processes carrying the session's
+  runtime ownership markers. A sweep that cannot confirm every marked process
+  exited refuses with `runtime_supervision_ambiguous` and a `recover` hint to
+  inspect and end the listed processes and retry the stop; a stop never accepts
+  unconfirmed cleanup (`--accept-unconfirmed-cleanup` belongs to `session rm`
+  only). On success the result is `stopped: true`, the session state is
+  `stopped`, the runtime `terminal`, and the stop transaction committed. A
+  refusal leaves the record exactly as it was (no `desired_state = stopped`, no
+  `requested` stop transaction); a retirement the supervisor reports as failed
+  rolls the intent back only when the worker is proven alive beside a live job.
+  Every other failure (a worker still running after the retirement, an
+  unconfirmed marked-process sweep, a retirement error with the worker gone or
+  unverifiable) keeps the persisted stop intent, and the watch (or the next
+  daemon start) finishes the stop as `stopped` once the worker is gone and the
+  marked-process sweep is confirmed; until then the session stays `conflict`
+  with `runtime_supervision_ambiguous`. A stop whose record names a runtime
+  (`worker_instance_id`) that the journal does not is refused with `runtime_identity_mismatch` before anything
+  is written, and only journal-proven runtimes are swept. A persisted stop
+  or removal intent is finished even over a `resume_binding_*` conflict, which
+  quarantines adoption only, at startup and in the watch. A pending stop ends
+  only once the marked-process sweep is confirmed, also when the worker left a
+  terminal journal. Every watch pass judges the persisted resume binding again,
+  so a quarantine whose classification could not be written stays in force,
+  and an adoption or classification whose write fails keeps the session
+  pending (listed as `runtime_supervision_unavailable`, with its one WARN, if
+  it had no entry); the next pass writes the classification without logging it
+  again. A committed stop is never turned into `lost` by a restart, although
+  the retired job leaves no terminal journal (a `resume_binding_*` conflict is
+  never re-checked). `session stop` on a session whose loss was observed
+  (shown `failed`) returns `stopped: false`; on a `lost` runtime without that
+  proof, a `reconnecting` or an `incompatible` one it is refused before
+  anything is written with `session_runtime_lost`,
+  `session_runtime_reconnecting`, or `worker_protocol_incompatible`.
+  `pohunek session rm <id>` removes a
+  `runtime_supervision_ambiguous` session: it retires the worker job of the
+  exact generation the record names through the service manager, which stops
+  that worker and its child, requires every worker the session's journals
+  record for that generation to be gone, and then deletes the logical record.
+  For another conflict reason, it first applies the same journal, job, and
+  process identity proof as `session stop`; a proven worker is stopped before
+  its record is removed. It refuses, keeping the record, an unproven worker
+  (`runtime_identity_mismatch` or `runtime_supervision_ambiguous`), a record
+  that names no worker generation (`session_runtime_conflict`), a retirement
+  the service manager cannot complete (`runtime_supervision_unavailable`), a still-running worker
+  journaled under another generation (`runtime_identity_mismatch`), and
+  unreadable session journals or a journaled worker that still runs after the
+  retirement, for example outside its job (`runtime_supervision_ambiguous`). Stop such a worker by hand after
+  preserving the evidence, then retry the removal. Every removal also sweeps
+  the processes carrying the session's runtime ownership markers and fails
+  with `runtime_supervision_ambiguous`, keeping the session and its removal
+  intent, while that sweep cannot confirm every marked process exited (for
+  example one whose environment cannot be read); look for leftover processes
+  of the session with `ps`, stop them, and retry. On macOS 27 the kernel
+  withholds the environment of Apple platform binaries such as `/bin/sh` and
+  `/bin/zsh`; the sweep decides those by fork lineage from the lost worker's
+  journaled creation number (`worker_spawn_id`, used only when the journal was
+  written in the current boot). A descendant of the worker (a `/bin/zsh`
+  session root and its helpers) is reaped, and a process created before the
+  worker is ignored. A hidden process the kernel puts in other coalitions than the
+  worker's (the worker's journaled `worker_coalitions`, same boot rule), such as a
+  launchd job, a system helper or another session's agent started after the
+  worker, is ignored too. An orphan that re-executed after its creator died, and a
+  process whose creator exited after the worker started, stay
+  unreadable candidates, so `session rm` may still need
+  `--accept-unconfirmed-cleanup` after you judge the listed processes. A runtime
+  whose worker journaled no creation number (a worker started by the previous
+  release) has no lineage or coalition proof, so every hidden process is a candidate.
+  On Linux a hidden process outside the `user@<uid>.service` cgroup subtree of the
+  worker's journaled `worker_control_group` (a Docker scope, a logind session scope)
+  is ignored, and so is one inside it that is outside the sessions slice holding
+  the worker (`app-*.scope`, `systemd-run --user --scope`, another user service)
+  or in the worker unit of another session. What still blocks is a hidden
+  process in the worker's unit, in another generation of its session, or beside the
+  unit under the sessions slice: look for `tmux-spawn-*.scope` in its
+  `/proc/<pid>/cgroup`. Every hidden process is listed when the journal lacks the
+  field.
+  A worker that journaled `boot_session_id` (a canonical UUID) and a host that has
+  rebooted since need none of this: no process of the runtime remains, the sweep
+  is complete without scanning, and the session leaves `running` with the lost
+  runtime. When
+  unreadable same-user
+  processes are the only obstacle, the error message names each as
+  `pid N (start S, command `name`)` (at most eight, then `and N more`) and
+  `recover` says to inspect them, end the ones that belong to the session, and
+  retry; a refusal for another reason lists no processes. If you have inspected
+  the listed processes and accept that they may keep running, `pohunek session
+  rm <id> --accept-unconfirmed-cleanup` removes the session anyway for that one
+  call (it uses the `session.remove_accepting_unconfirmed` method, so an older
+  daemon answers `method_not_found`): the processes are not signalled, and the result lists them as
+  `accepted_unconfirmed_processes` (`pid N (start S, command `name`)` in human
+  output; the command name is escaped because the process chooses it; the result lists the first 64 and `accepted_unconfirmed_total` is the full count, the daemon log names every one, and more than 1024 candidates refuse the removal with a count of at least the candidates found before anything is deleted). One that does carry the runtime marker keeps running unsupervised
+  after the worktree, logs, and record are gone. Any other unconfirmed reason
+  still refuses, and reconciliation and the retention sweep never have the
+  consent. A removal finished by
+  reconciliation after a daemon restart shows this `conflict` reason while it
+  retries on its own.
+- `incompatible`: the worker is alive but the daemon does not manage it.
+  `worker_protocol_incompatible` means private protocol negotiation failed;
+  `worker_marker_legacy` means its journal names a worker release before
+  0.33.1 (or none), whose children carry no `POHUNEK_WORKER_INSTANCE_ID`, so
+  no sweep could attribute them. A `worker_protocol_incompatible` worker can
+  be left alive for a daemon release that manages it; a `worker_marker_legacy`
+  worker comes from a release outside the supported upgrade window and its end
+  is not noticed, so remove it. `pohunek session rm <id>`
+  retires such a worker through the service manager the same way as an
+  ambiguous `conflict` one (refused with `worker_protocol_incompatible` when the
+  record names no worker generation). For `worker_marker_legacy`, `session
+  stop`, input, resize and attach are refused with `worker_protocol_incompatible`,
+  a `msg` naming the reason and a `recover` hint; on removal the runtime is
+  lost, and a child that left the worker's job keeps the removal refused until
+  it is ended by hand.
+
+Workers live only as long as the login session. Closing a terminal or locking
+the screen is safe. Logging out or rebooting ends every worker job; after the
+next login the daemon reports those sessions `lost` with `runtime_lost` and
+never restarts them. Use `pohunek session resume <id>` to recover a session
+with a native recovery reference into a new worker generation.
+
+Restarting the daemon job is safe for workers, but it closes current public
+connections. On Linux:
+
+```bash
+systemctl --user restart pohunek-<ns>-daemon.service
+```
+
+On macOS, the standard launchctl command
+`launchctl kickstart -k gui/$(id -u)/io.github.zajca.pohunek.<ns>.daemon`
+restarts the agent; it is not exercised by Pohunek's tests. The namespace `<ns>` is the `namespace` field of
+`pohunek service status --json`.
+
+After health returns, the same `worker_id`, `worker_instance_id`, worker generation
+and PID, and agent child PID demonstrate reconnection. A new runtime id means explicit
+recovery or a defect; it is not normal daemon restart behavior.
+
+If a lifecycle or runtime operation returns
+`runtime/session_runtime_commit_stale`, it lost a concurrent durable runtime
+commit. Its candidate was not published to the session registry or event
+stream. Run `pohunek session inspect <target> --json` again and treat the
+returned runtime identity, decimal generation, and state as authoritative.
+Retry only when the operation is still valid from that current runtime; do not
+reuse the losing operation's runtime coordinates.
+
+Do not interpret this error as a failed atomic rename or uncertain disk commit.
+When rename succeeds but the parent-directory durability sync fails, the daemon
+keeps the visible commit applied and writes a sanitized internal warning. It
+does not return `session_runtime_commit_stale` for that condition.
+
+For non-destructive terminal diagnosis, start without a historical cursor:
+
+```bash
+pohunek session screen <target> --json
+pohunek session detection <target> --json
+pohunek session read <target> --source recent --lines 100 --json
+pohunek session output <target> --max-bytes 65536 --json
+```
+
+Use `session detection` when activity classification is surprising. Its
+`supported_regions` array identifies the engine's accepted region kinds, while
+`previews` shows the exact current text supplied to each region required by the
+active manifest. A terminal title that only repeats the session name the launch
+gave the agent shows here as the agent set it, but the manifest does not
+evaluate it. Empty text is meaningful: for example,
+`last_non_empty_above_prompt_box` is empty without a complete prompt box. The
+preview waits for accepted agent/configuration changes before rendering.
+`session_detection_response_too_large` means the complete diagnostic would
+exceed the public response budget; reduce the manifest's number or size of
+parameterized regions before retrying.
+
+Current workers expose rendered visible rows rather than scrollback or
+soft-wrap metadata. For `recent`, `recent_unwrapped`, and `detection`, verify the
+truthful `source_used: "visible"` fallback and inspect `alternate_screen` before
+interpreting the tail as ordinary main-screen history. ANSI reads are reserved
+and fail with `session_read_ansi_unavailable`.
+
+Carry the returned `worker_instance_id`, `runtime_generation`, and `next_offset` into a
+continued output read or `session wait`. `session_runtime_changed` means the
+cursor belongs to an older PTY generation; restart from a fresh screen/tail.
+`session_terminal_unavailable` means the managed worker cannot currently serve
+the terminal; `session_has_no_managed_terminal` identifies an external observer
+entry. `worker_feature_unavailable` means a previous-version worker remains
+usable for lifecycle/attach but cannot provide control-plane observation.
+`session_waiter_limit_reached` is temporary bounded resource pressure; wait no
+longer than eight seconds and retry instead of opening unbounded parallel waits.
+For `session.wait_turn` the same code means the separate turn waiter pool (one
+global slot plus one slot per target) is full; end an older turn wait before
+starting another. A `cursor_reset` result follows a daemon restart or a cursor
+outside what the in-memory turn journal retains, also during a wait: continue from
+the returned cursor and read the progress, because events in between were not
+reported. A turn event arrives no earlier than `attention_debounce_secs` (5
+seconds by default) after the last stop or attention report, and later when
+reports repeat. A `turn_completed` whose window ends while the session is
+`working` is a stale stop and never fires; a short turn still fires once after
+its stop. A `notification.create` from a producer without a hook schema, or for
+a session this daemon does not hold, never produces a turn event.
+`pohunek session wait <target>...` without legacy flags is the CLI form of
+this method: a `cli_usage` failure saying the targets must be on one host means
+the targets name different hosts (run one wait per host), and one saying the
+legacy wait takes exactly one target means a legacy flag such as `--state` or
+`--timeout-ms` selected the 8-second single-session wait.
+
+Do not restart, stop, or boot out a worker job by hand. A worker job has no
+restart policy (systemd `Restart=no`, launchd without `KeepAlive`) because once
+a worker exits its PTY cannot be recreated. Stopping the job ends that
+generation's processes and therefore loses the runtime. Use
+`pohunek session stop <session-id>` for an intentional session stop.
+
+For a Hermes runtime, first run `pohunek host inspect local --json`. The daemon
+serves `hermes` only from the official Hermes package: without an installed,
+enabled and selected `pohunek.runtime.hermes` package the inventory has no
+`hermes` entry, and `pohunek session new --agent hermes` answers
+`agent_profile_not_found` with a hint that names `pohunek plugin install
+runtime/packages/hermes.tar.zst --catalog runtime/runtime-catalog.json` from an
+extracted daemon archive. With the package installed, the runtime
+must identify `agent_base: "hermes"`, `version: "0.20.0"`, and
+`supported: true` before starting a new Hermes session. A missing executable
+has no version-policy fields, and a launch answers `agent_binary_missing`; an
+installed but unparseable or wrong version is `supported: false`, and a launch
+answers `agent_runtime_unsupported`. Do not diagnose by opening, copying, or editing Hermes
+`state.db` or the operator's real `HERMES_HOME`. The compatibility commands use
+their own temporary homes.
+
+The archive installer runs under
+`pohunek service lock -- <installer>`, so it refuses before any change while
+another service command holds the transaction lock (`service_transaction_in_progress`) and no such command can
+start during its run. It then refuses before any change whenever
+`pohunek service check --json` fails: an unusable `HOME` or XDG root, an invalid
+prefix, or a prefix, unit, config, state, or runtime directory reached through
+a symlink or not private to the user, each reported with the error code the
+final install or upgrade would fail with. A host with a pre-service
+`pohunekd.service` unit is refused before the lock, naming release v0.40.1 as
+the one to install first, as is a pending
+`migrations/durable-session-workers.json` manifest, which only v0.40.1 imports.
+`packaging/install-daemon.sh --accept-runtime-loss`
+gates `pohunek service upgrade` of an installed service, whose live-session
+preflight is described in
+[update after release](update-after-release.md#upgrade-preflight).

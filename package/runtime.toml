@@ -1,0 +1,8 @@
+schema = 1
+id = "pohunek.context.assistant"
+version = "0.41.0"
+runtime_api = 1
+requires = ["package-context-v1"]
+
+[context]
+dir = "bundle"

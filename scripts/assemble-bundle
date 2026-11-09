@@ -1,0 +1,24 @@
+#!/bin/sh
+# Assemble package/bundle from the knowledge sources of a pohunek checkout.
+#
+# usage: scripts/assemble-bundle <pohunek-checkout>
+#
+# The bundle is the checkout's docs/knowledge without the unreleased log
+# fragments: the assistant guides, concepts, runbooks and safety policies, the
+# source map and the prompt contract (assistant/system.md). The package version
+# in package/runtime.toml follows the pohunek release the checkout is tagged with.
+set -eu
+
+[ "$#" -eq 1 ] || { echo "usage: $0 <pohunek-checkout>" >&2; exit 2; }
+source_dir=$1/docs/knowledge
+[ -f "$source_dir/assistant/system.md" ] || { echo "$0: $source_dir has no assistant/system.md" >&2; exit 1; }
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+bundle=$root/package/bundle
+rm -rf "$bundle"
+mkdir -p "$bundle"
+for entry in assistant concepts guides runbooks safety index.md log.md; do
+    [ -e "$source_dir/$entry" ] || continue
+    cp -R "$source_dir/$entry" "$bundle/$entry"
+done
+echo "assembled $bundle"

@@ -1,0 +1,89 @@
+# Pohunek Knowledge
+
+This directory is the hand-authored source bundle for the Universal Pohunek
+Assistant. It is public-safe Markdown that can be read by humans and by an
+ordinary agent session after the bundle is materialized.
+
+Start here:
+
+- [Architecture](concepts/architecture.md) explains the assistant model and data
+  flow.
+- [Optional team relay](concepts/team-relay.md) records the implemented reduced
+  relay foundation and the deferred multi-team design, clearly separated from
+  shipped protocol v4.
+- [Host identity and local governance](concepts/host-governance.md) describes
+  the shipped stable host ID, safe v4 inspection result, and owner-private
+  governance persistence boundary.
+- [Sessions](concepts/sessions.md), [projects](concepts/projects.md),
+  [worktrees](concepts/worktrees.md), and
+  [agent profiles](concepts/agent-profiles.md) describe the operating model.
+  The [runtime package archive](concepts/runtime-package-archive.md) defines the
+  canonical deterministic `tar.zst` format, its strict reader, and its limits.
+  The [runtime catalog](concepts/runtime-catalog.md) defines how the signed
+  catalog authorizes official packages and how local digest trust differs.
+  The [release attestation](concepts/release-attestation.md) defines the
+  per-package, per-target compatibility attestation, the binary-set digest and
+  `compat/matrix.json`. The [release bundle](concepts/release-bundle.md)
+  defines the assembled release layout, the release policy file, the catalog
+  sequence and expiry rules and the inventory the publisher verifies.
+  The [upstream staging](concepts/upstream-staging.md) page covers how the
+  pinned upstream runtime releases are installed and verified from the
+  compatibility locks and committed npm lockfiles.
+- [Setup](guides/setup.md), [project setup](guides/project-setup.md),
+  [remote hosts](guides/remote-hosts.md), and the
+  [Tailscale overlay](guides/tailscale.md)
+  cover common configuration paths. The
+  [runtime packages guide](guides/runtime-packages.md) covers installing,
+  updating, selecting, disabling, and removing runtime packages with
+  `pohunek plugin`; the [Pi runtime package](guides/pi-package.md) documents
+  the official Pi package, what was verified against a real Pi, and its limits;
+  the [Codex runtime package](guides/codex-package.md) documents the Codex
+  package source (the only source of `codex`), its parity with the built-in
+  Codex runtime of release 0.34.2, and the gaps found
+  against a real Codex; the [Claude Code runtime
+  package](guides/claude-package.md) does the same for Claude Code (the only
+  source of `claude`); the
+  [Hermes runtime package](guides/hermes-package.md) documents the official
+  Hermes package (the only source of `hermes`) with its operator plugin
+  payload, where releases ship it, and how its tests, CI and the release keep
+  it honest. The
+  [workflow plugins guide](guides/workflow-plugins.md) covers owner tooling
+  installed with `pohunek workflow`: the `workflow.toml` manifest, install
+  pinned by the owner's digest with consent, the CLI-owned store, running an
+  action with `pohunek workflow run` (verbatim arguments, `--json` results,
+  environment, context, limits, run log, owner knobs), and the same-UID trust
+  boundary.
+  The [plugin repositories guide](guides/plugin-repositories.md) is the rule
+  that a new plugin lives in its own repository and is admitted through the
+  plugin index, with the naming, required CI, compatibility declaration, release
+  snapshot and documentation split.
+  [Environment and executable resolution](guides/environment-resolution.md)
+  documents the macOS `PATH` policy. The
+  [Hermes operator](guides/hermes-operator.md) documents the managed plugin,
+  policy, typed tools, lifecycle reporting, and recovery boundaries. The
+  [Pohunek agent skill](guides/agent-skill.md) is the hand-authored source of
+  the bundled agent-facing CLI skill: safe discovery, explicit targeting, JSON
+  state reads, event subscriptions, send-and-wait flows, and owner-first
+  safety boundaries. `pohunek agent-skill` prints that bundled skill from the
+  binary: the skill text verbatim by default, or with `--json` one envelope
+  carrying the skill text and its `content_sha256`. The command is fully
+  local, so the global `--host` flag is accepted and ignored.
+- [TypeScript SDK](guides/ts-sdk.md) covers the TypeScript package surfaces,
+  the WebSocket relay transport contract, the test relay, and runtime paths.
+- [Debug daemon](runbooks/debug-daemon.md),
+  [debug session runtime](runbooks/debug-session-runtime.md),
+  [update after release](runbooks/update-after-release.md),
+  [install on macOS](runbooks/install-on-macos.md),
+  [runtime package recovery](runbooks/runtime-package-recovery.md), and
+  [plugin index keys](runbooks/plugin-index-keys.md) are operational
+  runbooks.
+- [Trust model](safety/trust-model.md), [secrets](safety/secrets.md), and
+  [repo `.pohunek/`](safety/repo-pohunek.md) are safety rules.
+- The [knowledge log](log.md) lists the changes of this bundle per release.
+- [Assistant system prompt](assistant/system.md) and
+  [source map](assistant/source-map.md) define assistant navigation and source
+  verification.
+
+Generated reference documentation is intentionally not committed here. It will
+be produced by the documentation build pipeline and merged into the materialized
+bundle later.
