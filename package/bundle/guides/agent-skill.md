@@ -228,7 +228,7 @@ The waited-input form of `session input` (`--until`/`--timeout`) works for every
 agent profile. Codex, claude, and hermes submit with a delay, so the daemon types
 the text, waits out the delay, re-checks the agent, and only then presses Enter;
 `--until working` confirms the agent started on the input (`submitted: true`),
-and an `idle` target counts only after `working` followed the submit.
+and an `idle` target counts only after `working` followed the submit. On Claude, Codex and Pi, terminal output alone is not `working`: an unsent prompt ends in `session_input_timeout`, not a confirmation.
 `session_input_not_submitted` means Enter was not written and the typed text may
 remain in the input box (it cannot be retracted); `session_input_timeout` means
 no target activity arrived, so inspect the session instead of resending.
@@ -382,6 +382,14 @@ pohunek session inspect <target> --json
 
 Report the blocked session, the notification kind, and the pending request as
 evidence; the operator decides.
+
+## Installing this skill
+
+The owner can install this skill next to the agent's other user skills with
+`pohunek integration install --agent claude --skill` (or `--agent codex`). The
+install is opt-in per agent home, never touches a skill it did not write, and
+`pohunek integration status --json` reports its state. Do not install or edit
+it yourself; ask the owner.
 
 ## Explicit safety boundaries
 

@@ -75,6 +75,12 @@ descriptor does not declare. The package tests compare the package with golden
 copies of that descriptor and its detection manifest in
 `compat/codex/builtin-v0.34/` (`runtime.toml`, `detect.toml`).
 
+- Agent skill: `[agent_skill]` places the bundled Pohunek skill (`pohunek
+  integration install --agent codex --skill`) at
+  `~/.agents/skills/pohunek/SKILL.md`, where Codex reads user skills. The
+  location is below the user's home, not the Codex home, so every Codex home
+  and profile shares one skill: `--all-profiles` writes it once, and removing
+  one profile's integration keeps it.
 - Launch: `codex` with the first prompt as a trailing positional argument;
   bracketed paste followed by a separate Enter 150 ms later for later input.
 - Readiness: `ready = "manifest_idle"`. Codex enables bracketed paste long
@@ -149,7 +155,10 @@ copies of that descriptor and its detection manifest in
   held `done` or `idle` beats a stale spinner title, and the record's
   `working` stands over an idle title. `done` turns into `idle` on the next
   key press; both read idle, so that change is no transition. `error` reads
-  idle. Codex 0.160.0 (recorded: no records) and 0.161.x to 0.162.x (not run; no
+  idle. The `kind` of a `blocked` record travels as `agent_state.blocked_kind` and as `SessionInfo.blocked_kind` in session snapshots (`session list` shows `blocked/<kind>`):
+  `permission` makes the projector's attention record `approval_required`, on
+  the same key as the `PermissionRequest` hook's record, and a record that
+  returns to `idle` or `done` resolves it. Codex 0.160.0 (recorded: no records) and 0.161.x to 0.162.x (not run; no
   records according to the Codex source) read from the title and the screen
   alone. A record never releases the initial prompt: `manifest_idle`
   still waits for the title or the screen.

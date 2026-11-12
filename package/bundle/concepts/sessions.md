@@ -147,7 +147,7 @@ arrives before Enter, Enter is not written and the call fails with
 because arbitrary TUIs cannot retract it. A deadline that is not longer than the submit delay, or that or a shutdown arrives before the body is written, writes nothing (`session_input_timeout`, `daemon_shutting_down`). An `idle` target on delayed framing
 counts only after `working` evidence above the boundary, since the prompt box
 reads as idle until Enter is written; `--until working` confirms the agent
-started on the input, and a success carries `submitted: true`. Zero-delay waited
+started on the input, and a success carries `submitted: true`. On a session whose manifest declares a program status source (Claude, Codex, Pi), activity from the process watcher (output such as the startup banner or the composer repainting the typed text) never counts as `working` here, nor as the `working` evidence an `idle` target requires, and `prompt_delivered` ignores it too. Zero-delay waited
 input reserves the exclusive worker write first, then captures its causal
 boundary immediately before the prepared atomic two-fragment plan starts. A
 timeout or shutdown while reserving the worker cancels the unsent plan without
@@ -168,8 +168,9 @@ arrive before the deadline (on delayed framing also when Enter was written and
 no target followed). Rust and TypeScript
 SDK helpers validate the timeout locally and fail closed with
 `session_input_wait_contract_mismatch` when a daemon ignores `wait` or omits
-runtime-scoped evidence. Its recovery guidance says to inspect the session rather
-than blindly resending input because delivery may already have happened.
+runtime-scoped evidence. Its recovery guidance says to read the screen before resending or pressing
+Enter, because the text may still sit unsent in the prompt or may already have
+been taken.
 A Claude session also reports each submitted prompt through the
 `UserPromptSubmit` hook. A caller that opts in with `allow_prompt_accepted`
 (the CLI always does for a waited input) gets that report as the answer to a
@@ -419,16 +420,10 @@ a later hook report merged into, stays as it is (a record is ordered by its newe
 contribution), whether the input waited in a backlog or was only handled late behind a slow
 seed.
 
-Notification policy is provider-keyed. `enabled` is the complete base per-kind
-policy, while the deterministically ordered `providers` object holds complete
-overrides by open provider wire name. A missing provider key falls back to
-`enabled`. The old fixed `codex` and `claude` policy fields are not accepted.
-
-The notification policy also owns automatic retention. Informational/success,
-warning, acknowledged attention, acknowledged error, and archived records have
-separate TTLs. Unresolved action-required and error records have no automatic
-TTL. After a sweep appends deletion events, the daemon atomically compacts the
-JSONL action log once its configured action threshold is reached.
+`notifications.record_ttl_secs` bounds how long a resolved record stays. An
+unresolved attention record has no automatic TTL. After a sweep appends deletion events,
+the daemon atomically compacts the JSONL action log once its configured action
+threshold is reached.
 
 Every session has an immutable launch identity: `agent` is the selected profile
 name and `agent_base` is the `RuntimeRef` of the runtime backing the session (for
@@ -1265,6 +1260,15 @@ daemon therefore runs a retention sweep that ages unavailable sessions out.
 The policy is a stored file at `<data_dir>/session-policy.json`. `pohunek session
 retention sweep` uses it. The daemon reads the file at startup, so an edit takes
 effect after a daemon restart.
+
+A terminal session ages from `ended_at`, the moment it ended, which a daemon
+restart, a metadata edit or any other record update does not move. A session
+whose runtime is `lost` ages from the last time the daemon reached the runtime
+(`last_connected_at`), or from `ended_at` when the runtime never connected. A
+record with neither ages from its `updated_at`. The schema 19 migration gives a
+finished record its last update as `ended_at`; a schema 18 daemon re-stamped
+that update on every start, so an existing finished session ages from the last
+start before the upgrade.
 
 The shipped default is deliberately conservative: sweeps are **disabled**, and
 once enabled they run every 6 hours, keep a terminal (`stopped`/`done`/`failed`)

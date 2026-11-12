@@ -41,7 +41,9 @@ report the same code in `package_source_error`, and `doctor` fails its
 `asset_source` check with that code's recovery hint:
 
 - `hermes_package_not_installed`: no Hermes package is installed. Install the
-  official package from its signed catalog, then retry. `integration uninstall`
+  official package from its signed catalog, then retry. On a host without a
+  local daemon, `pohunek plugin install --release <extracted daemon archive>
+  --runtime hermes --yes` installs it without a service. `integration uninstall`
   needs no package.
 - `hermes_package_not_selected`: a Hermes package is installed, but no enabled,
   catalog-authorized version is selected. Enable and select the intended
@@ -51,6 +53,9 @@ report the same code in `package_source_error`, and `doctor` fails its
   operator sidecar contract, such as an unlisted, missing, or altered operator
   file, or a policy-path placeholder that is absent or repeated. Verify it with
   `pohunek plugin doctor` and reinstall it from its signed catalog.
+- `hermes_package_revoked`: a recorded signed catalog revoked the selected
+  Hermes package digest. Select another installed version with `pohunek plugin
+  select`, or install a release that carries a new package.
 - `hermes_package_registry_unreadable`: the runtime package registry cannot be
   read safely. Run `pohunek plugin doctor` and repair the registry.
 
@@ -205,16 +210,11 @@ stored range no longer overlaps the installed CLI. It otherwise preserves the
 installed CLI path, access mode, host allowlist, and bounds unless their
 replacement flags are supplied.
 
-A plugin installed by v0.33.0 keeps its `3..=3` policy and CLI tools working
-while protocol 3 remains in the CLI's `3..=4` window. The CLI accepts its old
-`--runtime-id` observation flag and returns the old `runtime_id` spelling
-alongside `worker_instance_id` in session summaries, including the list result
-used to recover a timed-out start. Other typed CLI results keep their current
-shape. This does not change the
-policy's access mode, host allowlist, or file permissions. A policy entirely
-outside the CLI window fails closed as `pohunek_cli_incompatible`; update the
-plugin and policy with `pohunek integration update --agent hermes` using its
-installed target. The bridge is removed when protocol 3 leaves the window.
+A plugin whose policy names protocol 3 or 4 is outside the CLI's `5..=5`
+window, so it fails closed as `pohunek_cli_incompatible`; update the plugin and policy with
+`pohunek integration update --agent hermes` using its installed target. The
+update does not change the policy's access mode, host allowlist, or file
+permissions.
 
 The plugin preserves the daemon's exact origin-session protection. It must deny
 these seven methods when they target the session hosting Hermes:

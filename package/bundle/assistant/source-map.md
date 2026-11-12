@@ -45,6 +45,8 @@ Current CLI and command surface:
 - `crates/cli/src/commands/discovery_cache.rs`
 - `crates/cli/src/commands/setup.rs`
 - `crates/cli/src/commands/setup_host.rs`
+- `crates/cli/src/commands/setup_assistant.rs`
+- `crates/cli/src/commands/setup_hooks.rs`
 - `crates/cli/src/commands/host.rs`
 - `crates/cli/src/commands/integration.rs`
 - `crates/cli/src/commands/prompt.rs`
@@ -553,6 +555,8 @@ Daemon, sessions, integrations, and project state:
 - `crates/daemon/src/project/mod.rs`
 - `crates/daemon/src/project/config.rs`
 - `crates/daemon/src/project/detect.rs`
+- `crates/daemon/src/project/candidates.rs` — `project.candidates` aggregation, bounds and path filters.
+- `crates/daemon/src/external/history.rs` — the bounded, symlink-safe read of agent history heads for `project.candidates`.
 - `crates/daemon/src/worktree/mod.rs`
 - `crates/daemon/src/store/mod.rs`
 - `crates/daemon/src/capabilities.rs`
@@ -587,7 +591,11 @@ Agent runtime and profile resolution:
 - `crates/daemon/src/agent/native_launch.rs`
 - `crates/daemon/src/agent/native_reference.rs`
 - `crates/daemon/src/agent/profile.rs`
+- `crates/daemon/src/agent/credential.rs` — the credential-literal detector for profile inputs.
+- `crates/daemon/src/agent/profile/compose.rs` — composes the text of a new profile.
+- `crates/daemon/src/packages/create.rs` — `package.create_profile`.
 - `crates/daemon/src/agent/host/`
+- `crates/daemon/src/integration/agent_skill.rs` — the opt-in agent skill install, status and removal.
 - `crates/xtask/tests/no_special_dispatch.rs`
 - `crates/daemon/src/detect/mod.rs`
 - `crates/daemon/src/detect/osc.rs`
@@ -628,7 +636,7 @@ Runtime package archive format:
 - `crates/daemon/src/agent/profile.rs` — profile `package`/`digest` pins and `pinned_digests`.
 - `crates/protocol/src/package.rs` — `package.*` payloads and stable error codes.
 - `crates/cli/src/commands/plugin.rs` — `pohunek plugin list|inspect|install|link|update|select|enable|disable|uninstall|doctor`.
-- `crates/cli/src/commands/plugin_profile.rs` — `pohunek plugin profile list|migrate`.
+- `crates/cli/src/commands/plugin_profile.rs` — `pohunek plugin profile list|migrate|create`.
 - `docs/knowledge/guides/runtime-packages.md`
 - `docs/knowledge/guides/plugin-repositories.md` — the rule that new plugins live in their own repositories, naming, required CI, index admission and the release snapshot; the guard is `check_plugin_directories` in `crates/xtask/src/doc_drift.rs`.
 - `docs/knowledge/runbooks/runtime-package-recovery.md` — recovery from failed package verification, refused official installs, and disabled, removed or damaged pinned packages.
@@ -652,7 +660,7 @@ Runtime package archive format:
 - `crates/cli/tests/codex_package.rs` — pure package tests (descriptor and manifest parity with the v0.34.2 built-in goldens), catalog-installed package launch and version-probe tests, the clean-host scenarios (bare `codex`, its integration and an unpinned `base = "codex"` profile refused with the install hint until the package is installed), and the opt-in real-Codex tests.
 - `crates/cli/tests/support/responses_stub.rs` — loopback Responses-API stub used instead of a model provider.
 - `runtime-packages/claude/runtime.toml` — Claude Code runtime descriptor (hook native reference, resume argv, `semver-line-v1` version probe).
-- `runtime-packages/claude/detect.toml` — Claude Code detection manifest: the v0.34.2 built-in one plus the #613 rules (running-turn title and footer, wrapped selection forms, first-run and trust dialogs, the `done <time>` completed-turn line, the npm `claude.exe` process); the daemon compiles no Claude in, so this package is the only source of `claude`.
+- `runtime-packages/claude/detect.toml` — Claude Code detection manifest: the v0.34.2 built-in one plus the #613 rules (running-turn footer, wrapped selection forms, first-run and trust dialogs, the npm `claude.exe` process); the daemon compiles no Claude in, so this package is the only source of `claude`.
 - `compat/claude/compatibility-lock.json` — pinned Claude Code release, native binary SHA-256 and supported range.
 - `compat/claude/screens/` — screens and terminal titles captured from a real Claude Code that the manifest test classifies.
 - `compat/claude/builtin-v0.34/` — golden copies of the built-in Claude descriptor and detection manifest of release 0.34.2.
@@ -741,7 +749,7 @@ Bundled agent skill:
 
 - `docs/knowledge/guides/agent-skill.md`
 - `crates/xtask/src/agent_skill.rs`
-- `crates/cli/src/commands/agent_skill/SKILL.md`
+- `crates/knowledge/src/agent_skill/SKILL.md`
 
 Hermes operator plugin and managed lifecycle:
 

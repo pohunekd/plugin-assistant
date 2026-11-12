@@ -118,11 +118,56 @@ The features this core implements:
 | `integration-cline-hook-v1` | 0.40.0 | `integration.handler = "cline-hook-v1"` |
 | `program-status-gate-v1` | 0.41.0 | detection manifest `[program_status] authority_from` and rule `below_authority` (no descriptor key; the package lists it so an older core refuses it) |
 | `package-context-v1` | 0.41.0 | `[context]` |
+| `version-probe-open-range-v1` | 0.42.0 | `version_probe` with `min` and no `below` |
+| `detect-composer-absent-v1` | 0.42.0 | detection manifest rule matcher `composer_absent` (no descriptor key; enforced against the manifest the descriptor names) |
+| `agent-skill-v1` | 0.42.0 | `[agent_skill]` |
 
 The core owns an append-only table of its features. A row is never removed or
 renamed, because a published descriptor may require it; the table equals a
 snapshot file that a test compares. Which core version first has a feature is
 not part of the refusal, because an older core cannot know it.
+
+## Agent skill location
+
+A runtime whose agent reads user-level skills declares where, in an optional
+`[agent_skill]` table, behind the runtime feature `agent-skill-v1`:
+
+```toml
+requires = ["agent-skill-v1"]
+
+[agent_skill]
+root = "config_home"   # closed set: "config_home" | "user_home"
+dir  = "skills"        # relative path of plain components
+```
+
+`root = "config_home"` is the runtime's `[config_home]` (the table is required
+with it) and `dir` is a plain relative path whose last component is `skills`.
+`root = "user_home"` is the user's home directory and accepts only
+`dir = ".agents/skills"`, a location every home and profile of the agent
+shares. The descriptor only names the location: core owns the content, the
+file layout (`<root>/<dir>/pohunek/SKILL.md` and the ownership marker
+`.pohunek-managed` beside it), the modes and every write, which
+`pohunek integration install --skill` performs for the homes it selects. The
+Claude package declares `config_home` and `skills`, the Codex package
+`user_home` and `.agents/skills`; a runtime without the table, or without a daemon-run hook handler such as Pi,
+answers `integration_agent_skill_unsupported` to `--skill`. The official packages that
+declare it are Claude 2.1.0 and Codex 1.9.0, which reach a host with the
+release that ships the feature.
+
+The lifecycle is marker-owned. `integration install --skill` creates the skill
+or refreshes a `stale` one (marker and file agree, another Pohunek version
+wrote them); a `modified` skill (edited since,
+`integration_agent_skill_modified`), a `foreign` one (no valid marker,
+`integration_agent_skill_foreign`) and an `unsafe` path (a link or a group- or
+world-writable directory, `integration_agent_skill_unsafe`) are left as found
+and make the command exit non-zero while the hooks are installed. A plain
+`integration uninstall` removes the hooks and a marked skill; `uninstall
+--skill` removes only the skill, and is also how a `modified` skill is reset
+(then install it again). A skill in the shared Codex location survives the
+removal of one profile (`kept_shared`) and goes with the bare runtime or
+`--all-profiles`. `integration status` reports `skill` per home without
+changing the hook state. A removal that fails on an owned skill is an error,
+never reported as foreign.
 
 ## Session placement
 
@@ -162,7 +207,11 @@ the feature is `runtime_feature_unsupported`.
 The worker checks a runtime that declares `[placement]`: a process of the
 generation that left the PTY's POSIX session and is named for the provider or
 listens is reported as `placement_escape` in `session inspect` and
-`pohunek doctor`. The check kills nothing.
+`pohunek doctor`. The check kills nothing. The report is `unobservable`, never
+clean, when the host withholds the PTY child's session or the process table, or
+when a process that carries the generation's marker cannot be classified (its
+listening sockets cannot be read); a process whose facts the host withholds
+cannot be attributed to the generation and is skipped.
 
 ## Config home
 
@@ -339,7 +388,9 @@ timeout, ambiguity or missing fact means they are not appended:
    entry.
 2. The daemon fetches `HEAD` of `https://github.com/<owner>/<repo>.git` (one commit,
    trees only, every object verified) into a private bare repository it creates for the
-   evaluation below the worker state root (never in a directory a session can write). The fetch uses https only, no configuration, no credential helper and no
+   evaluation below the worker state root (never in a directory a session can write) and
+   removes it when the evaluation ends; daemon start removes any such repository a daemon
+   that stopped during a stalled evaluation left behind. The fetch uses https only, no configuration, no credential helper and no
    redirect, so only a public repository can be trusted, and a host that cannot reach
    GitHub (or needs a proxy variable the daemon does not pass) trusts nothing.
 3. For each declared path, the files on disk are exactly the blobs that commit's tree
@@ -372,9 +423,19 @@ checkout and the reason, never a URL, and launches without the arguments. A run 
 fixed arguments equal to the `trusted_checkout_args`, in the descriptor's `args` or a host
 profile's `args`, is dropped from a create or resume command, so only the predicate
 adds them and a session whose frozen arguments hold them does not carry them into an
-untrusted checkout. Each declared file is opened without following a symbolic link in its last path component,
-checked on the opened descriptor (a regular file of at most 4 MiB) and hashed from that
-descriptor; a larger file, a special file or a symbolic link refuses.
+untrusted checkout. The launch directory is opened once and every component below it is
+opened relative to its parent directory without following a symbolic link, so a declared
+directory or file that is replaced by a link, or by another kind of file, while the
+evaluation runs refuses instead of redirecting a read. Each declared file is checked on
+the opened descriptor (a regular file of at most 4 MiB) and read through that descriptor
+up to the bound, so a file that grows after the check refuses without being read further;
+all declared files together may hold at most 64 MiB. The contents of every file are
+hashed by one git process. A larger file, a special file or a symbolic link refuses.
+A launch stops waiting for an evaluation that has not finished at the 30 second deadline, for
+example one stalled in a file system call on a hung mount: it logs one
+`checkout_trust.failed` warning and launches without the arguments.
+While that evaluation is still blocked, a launch in the same directory is withheld at once with a
+`checkout_trust.failed` warning naming the stalled evaluation.
 
 The keys join the digest of a built-in descriptor only while declared. A core
 older than 0.40 refuses the descriptor with `runtime_feature_unsupported`.
@@ -481,6 +542,8 @@ directory and on the newest 1024 session directories of each dated root,
 registered newest first;
 a new session directory evicts the watch registered longest ago, and older sessions are reached
 by the periodic pass, so a large store never takes watches from other runtimes.
+On both backends (inotify on Linux, the recursive FSEvents watch on macOS) a change
+event the backend reports for a session log indexes it, wherever the pass stopped.
 A foreground agent started inside a shell session is
 attributed through this root; the agent's session log is the only evidence.
 
@@ -622,11 +685,27 @@ overlay the config home would produce and reports a file a launch would refuse a
 at launch, not there. The reporter rebuilds its search path from the absolute entries
 of the `PATH` Muse leaves it, else a fixed system path, so a `python3` that only the
 daemon's `PATH` finds (Homebrew or Nix, say) is found by `integration doctor` but not
-by the hook. The reporter is stateless, reports the
+by the hook. The reporter writes no file but the hook trace, reports the
 root session only (`session_id` equal to `MUSE_SESSION_ID`, `-reminder` threads
 dropped), reports subagents without a role, and reaches the worker only. A
 foreground `muse` started inside a shell session gets no overlay and no
-identity. The payload fields, the hooks file layout and the `-c` spelling are
+identity. Muse starts the hooks of the conversation `/clear` creates without the
+`POHUNEK_*` variables, so the overlay also passes the reporter the session id, a
+handshake file path and the hook trace location as arguments, and the session
+worker writes that file (`launch-input.muse-handshake.json`, mode `0600`, in the
+session's launch-input directory) after it chose its instance id and before it
+starts Muse; each launch removes the earlier copy and the file goes with the
+session. The reporter reads it only when `POHUNEK_ENV` or `POHUNEK_SESSION_ID` is
+missing, and refuses a file that is missing, a symlink, not a regular file, owned
+by another user, readable by group or other, hard-linked, larger than 8 KiB, not
+the expected JSON or written for another session; every refusal reports nothing
+and appends one `handshake_*` line to the hook trace the overlay named. A session
+launched before the upgrade keeps the overlay and reporter of its launch, which read
+no handshake, so after `/clear` it reports nothing and traces nothing until it is
+resumed or relaunched. A worker binary that predates the handshake ignores the
+`Initialize.handshake_file` field and writes no file, so a session it runs under a
+newer daemon traces `handshake_missing` after each `/clear`, and a relaunch on that
+same worker binary does not change it. The payload fields, the hooks file layout and the `-c` spelling are
 unverified against a real Muse run.
 `cline-hook-v1` (feature `integration-cline-hook-v1`, hook schema
 `identity-subagent-v1`, reference kind `id`) keeps a Cline session in the TUI's
@@ -770,7 +849,11 @@ repeating the command; the CLI never retries an install on its own.
   signature, the revocations and the archive digest. The CLI checks
   `host.inspect` for `package_install_index_supported` before it fetches
   anything and fails with `plugin_index_unsupported` when it is absent, which
-  means a daemon older than 0.40 or a host without the channel file. It parses
+  means a daemon older than 0.40 or a host without the channel file. A
+  `pohunek.context.*` reference also needs `package_install_index_context_supported`
+  (`plugin_index_context_unsupported` when absent) and is resolved from the
+  schema 2 document `official-index-v2.json` only; a runtime reference reads
+  `official-index-v1.json`, which every daemon accepts. It parses
   the index with the same strict parser the daemon uses, skips entries that do
   not list this platform or whose `core` range excludes this core version, takes
   the highest semantic version (a pre-release core such as `0.41.0-rc.1` does
@@ -897,8 +980,22 @@ dir = "bundle"   # package-relative directory that holds the files
   opt-in, and never appears among the supported agents.
 - The daemon verifies the package root against its archive digest each time it
   resolves the files for a request, and uses only the selected, enabled package
-  of the id. The files are then read by path: a session that already started
-  keeps reading them, and uninstalling the package removes them under it (#2066).
+  of the id. The files are then read by path, so a launch pins the digest it
+  was served: `session.new` takes it as `context_package_digest`, checks that it
+  is an installed, enabled package of the id whose root verifies, and records it
+  in the session's resume binding. While the session is live, lost or
+  resumable, `plugin uninstall` of that digest is refused with
+  `package_referenced`, also after a newer release was installed and selected
+  and after a daemon restart, and `session rm` or a retention sweep releases it.
+  A host whose daemon does not advertise `session_new_context_pin_supported`
+  launches the assistant unpinned, and an uninstall there removes the files
+  under a running session. A daemon replaced by an older release between the
+  launch's capability check and its `session.new` is refused with
+  `session_new_context_pin_unsupported` before anything is sent. Rolling the daemon back past the release that
+  introduced the pin needs the store copy `metadata.jsonl.pre-schema-<old>`,
+  because the older daemon refuses a store of a newer schema; `<old>` is the
+  oldest schema the migration found (`-17` from 0.41, `-15` from 0.40.x).
+  Sessions created after the upgrade are lost on that rollback.
 - For the assistant, `dir` holds `index.md`, `assistant/system.md` (the prompt
   contract) and the concept files; the daemon answers `assistant.materialize`
   with the directory, its concept index and the contract text, and
@@ -915,7 +1012,7 @@ A descriptor names the supported release range with `version_probe` in
 - `semver-v1` when it prints exactly `MAJOR.MINOR.PATCH` (Pi).
 - `semver-line-v1` with a `line` template when the release sits inside fixed
   text: `line = "codex-cli {version}"` for `codex-cli 0.160.0`,
-  `line = "{version} (Claude Code)"` for `2.1.289 (Claude Code)`,
+  `line = "{version} (Claude Code)"` for `2.1.309 (Claude Code)`,
   `line = "Hermes Agent v{version} {annotation}"` for
   `Hermes Agent v0.20.0 (2026.8.3)`.
 
@@ -931,6 +1028,40 @@ a `line` template and `requires = ["version-probe-revision-v1"]`: it orders
 `(MAJOR, MINOR, PATCH, n, m)` with an absent part as 0 (`1.4.13` equals
 `1.4.13-R0`), and `min` and `below` accept both forms. `semver-v1` and
 `semver-line-v1` keep refusing any suffix.
+
+A runtime that is supported from a release on, with no upper bound, omits
+`below` and lists `requires = ["version-probe-open-range-v1"]`:
+
+```toml
+requires = ["version-probe-open-range-v1"]
+
+[runtime]
+version_probe = { parser = "semver-v1", args = ["--version"], min = "3.0.74" }
+```
+
+Every release from `min` on is admitted, so a new major release of the agent
+launches without a package update; a release below `min` is refused with the
+minimum named. The feature id is what makes an older core refuse the package
+cleanly (`runtime_feature_unsupported`) instead of reading a half-declared
+probe; without the entry the omission is refused on this core too. `below`
+without `min` is not a policy. Prefer a closed range unless the owner of the
+package accepted that drift is caught by periodic capture of the agent, not by
+the daemon.
+
+### Version probe environment and deadline
+
+The probe runs the declared `args` in a cleared environment with a private
+`HOME` and a 2 second deadline, with only the launch `PATH` and the runtime's
+`[launch_env]` pairs. A program whose version command is slow unless a launch
+flag is set can therefore declare that flag in `[launch_env]` and be probed
+fast. The deadline is the daemon's; a package cannot declare another. A probe
+that runs to the deadline is refused as `agent_runtime_unsupported` with its own
+message and a `recover` hint, so the cause (a version command that waits for the
+network, say) is visible and not mistaken for an unsupported release. An agent
+that has no environment switch for the slow step, and reads it from a settings
+file under a home the probe does not see, needs a launcher program whose
+version command answers without it; set the profile's `program` to that
+launcher.
 
 ## Declaring input readiness
 
@@ -1018,6 +1149,57 @@ downgrades this way: an override manifest without an eligible idle rule keeps
 the strict readiness, so the input is refused instead of released by a signal
 the runtime did not declare.
 
+## Dialog rules that fail closed
+
+A dialog that replaces the composer is told apart from quoted model text by
+text alone unless the rule also requires the composer to be gone. A detection
+manifest rule may add the matcher `composer_absent = true` to its text matchers
+(`requires = ["detect-composer-absent-v1"]`):
+
+```toml
+[[rules]]
+id = "question"
+state = "blocked"
+priority = 980
+region = "bottom_non_empty_lines(12)"
+contains = "which option"
+composer_absent = true
+```
+
+The rule reads `blocked` only while the screen shows no prompt box, so a
+clipped dialog whose question text quotes a horizontal-rule line still reads
+`blocked`, and a runtime that declares `refuse_while_blocked` refuses typed
+input instead of answering the dialog. The matcher is a screen-wide fact, not
+text of the rule's region. It sits in the rule's own table or in a nested gate
+table (`all`, `any`, `not`, `gates`) next to a text matcher, counts as one
+matcher against the manifest budget, and accepts only `true`; there is no
+"composer present" form. Every gate table, nested ones included, needs a text
+matcher, so a table that holds nothing but `composer_absent` is refused like
+any table without one. At the top of a rule the matcher therefore only narrows
+what the rule matches; under `not` it negates together with its siblings.
+
+The fact is the same heuristic as the `prompt_box_body` region: a prompt box
+exists when the visible grid holds at least two horizontal-rule lines (the
+second counted from the bottom is its top border). It counts every rule line on
+the visible grid: the dialog's own frame, transcript lines above the dialog, and
+quoted model text alike. A rule that uses the matcher is skipped while the
+screen is not part of the detection context, so a stale screen never reads as
+"no composer".
+
+The matcher therefore only narrows well for a dialog that draws no rule line of
+its own, and even then two quoted rule lines on the screen defeat it. A dialog
+that draws one rule (Claude's approval dialog draws one full-width rule) is
+defeated by a single quoted rule line anywhere on the screen: the rule stops firing, the session reads unblocked, and
+`refuse_while_blocked` no longer applies. Check the recorded screen of the
+dialog before relying on the matcher, and keep the text matchers of such a
+dialog sufficient on their own.
+
+The matcher lives in the detection manifest, which the descriptor key gates
+cannot see. A descriptor whose manifest uses it without listing the feature is
+refused with `runtime_feature_unsupported` naming `detect_manifest`, and a core
+that predates the feature refuses a package that lists it for the same reason
+before it reads the manifest. The official packages do not use the matcher yet.
+
 ## Declaring program status
 
 A detection manifest opts in to OSC 7501 program-status evidence with a table:
@@ -1045,8 +1227,10 @@ first input keeps doing so.
 other app, records without an app and records of children (an `id=` pair) are
 ignored. `answer_probe = true` makes the session worker answer the program's
 `ESC ] 7501 ; ? ESC \` probe, which programs such as Claude Code and Pi wait
-for before they report; leave it off for a program that reports without a probe
-(Codex). A rule may set `overrides_program_status = true`: while a record is held
+for before they report, also when a person starts the program by hand below a
+shell session (the worker answers only while a process of the PTY foreground
+group matches the runtime's `[process]` matchers); leave it off for a program
+that reports without a probe (Codex). A rule may set `overrides_program_status = true`: while a record is held
 it is evaluated like any other rule and, as the screen winner, beats a
 non-blocked record (for a state the program reports misleadingly); with no
 record held it is skipped, so the screen reads as it would without the rule
@@ -1132,6 +1316,27 @@ read counts as incompatible.
 - The selected version keeps serving fresh launches and nothing falls back to
   another package. A pinned profile or session still resolves from exactly its
   digest.
+- **Revoked digests.** When a later signed catalog revokes the digest of an
+  installed official package (the catalog is recorded by `plugin install
+  --release`, `plugin update --catalog`, setup or upgrade), the package is
+  refused for fresh launches (a pinned profile included), resume and relaunch of
+  stored sessions, `plugin select`, enabling and `plugin profile bind` with
+  `package_revoked`. The selection is never moved on its own: run `pohunek
+  plugin select` for another installed version, or install a release that
+  carries a new package. A session already running from the digest keeps
+  running; `session list` flags it with a `hook` warning (`detail` `package_revoked digest=<digest>`) and `plugin
+  doctor` reports the package as `revoked`. A command of a revoked
+  catalog-authorized package is not run: `command.run` fails
+  `command_unavailable`. Packages installed by explicit
+  digest or linked are not affected. `integration doctor --agent hermes`
+  reports the revoked Hermes package in its `asset_source` check. `plugin doctor`
+  lists the sessions that still run from a revoked digest, and an unreadable
+  `revoked-digests.json` fails it with `package_revocations_unreadable` (fix the
+  file's mode or owner, or restore a copy; a damaged file, or one a newer
+  release wrote, is cleared by removing it and installing the latest release
+  catalog again with `plugin install --release`, which records its revocations
+  anew, while a revocation that no later catalog repeats is lost). The upgrade preflight reports a stopped or live
+  session on a revoked digest as `already_not_resumable` (`package_revoked`).
 - The state is derived at each call from the registry and the sessions, never
   stored, so a daemon restart recomputes it. It clears when the last reference
   to the old version is gone (stop and remove the sessions, unpin or rebind the
@@ -1268,6 +1473,19 @@ one state:
 - `unreadable`: the file is a symlink or special file, is not owned by you, is
   group- or world-writable, is not valid TOML, or has an invalid `base`,
   `package`, or `digest`.
+
+`pohunek plugin profile create <name> --base <runtime> [--home <abs-path>]
+[--arg <a>]... [--secret-env <NAME>]... [--replace <sha256:...>] [--dry-run]
+[--json]` creates a profile through the daemon's `package.create_profile`
+method, under the same lifecycle authority, so a concurrent uninstall of the
+target either runs first (`package_profile_target_invalid`) or is refused with
+`package_referenced`. `--home` is written to the `[config_home]` `env` variable
+the package descriptor declares, so a base without that table takes no home
+(`package_profile_home_unsupported`) and one with a `subdir` is refused
+(`package_profile_home_invalid`). The file is written at mode 0600; the other
+refusals are `package_profile_exists`, `package_profile_digest_mismatch`,
+`package_profile_credential_literal` and `package_profile_dir_unsafe`. A daemon
+without the method (`package_create_profile_supported`) is sent nothing.
 
 `pohunek plugin profile migrate <name> [--digest <d>] [--yes] [--json]` pins
 the profile through the daemon's `package.bind_profile` method; the command

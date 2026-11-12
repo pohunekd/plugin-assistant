@@ -83,7 +83,8 @@ reserved, so either way of installing serves it.
 - Known limits: a dialog drawn with `ctx.ui.custom()` has no screen rule and
   reads as Pi's record says (working during a run); the branch-summary busy
   border reads `idle`, as Pi declares it; `error` reads as `idle`; a Pi nested
-  under a shell session gets no probe reply and stays screen-only; a profile
+  under a shell session is answered by the worker that lists Pi's `[process]`
+  matchers, and stays screen-only below a worker that predates that list; a profile
   that sets `PI_PROGRAM_STATUS=0` also gives screen-only detection. A client's
   own reply to the probe can reach Pi before the worker's reply when the worker
   has to wait behind a paced input; Pi then reads "no program status" for that
@@ -166,7 +167,8 @@ reserved, so either way of installing serves it.
   so the model, session, tree, fork and settings selectors (opened by the
   owner, asking nothing) match no rule and keep the byte-activity fallback,
   which publishes `working` from process output until the editor returns. A blocked session raises the "Agent needs attention"
-  notification and the `agent_blocked` turn event, and ends `session wait
+  notification and the `agent_blocked` turn event (an `approval_required` record
+  and turn event when the record reports `kind=permission`), and ends `session wait
   --activity blocked`. The package's unrestricted input policy still accepts a
   plain `session input` while Pi is blocked (and Pi's submit delay rules out
   the waited form), so an orchestrator waits for `idle` or `blocked` before it
