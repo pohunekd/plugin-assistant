@@ -419,6 +419,12 @@ open and the records stay authoritative
   `reason=blocked`. A record that goes from `blocked` to `idle` or `done` (Esc, a
   denial, the automatic denial of a safety check) resolves the attention
   record (`a_blocked_record_followed_by_an_idle_record_resolves_the_attention`).
+  After a root `clear` dropped the `blocked` record, Claude's redraw of the
+  prompt box is a repaint, whether it arrives in one write or several: the
+  attention record stays open until the next `working` record or working
+  screen rule
+  (`a_split_redraw_after_a_cleared_record_leaves_the_approval_open`,
+  `a_single_write_redraw_after_a_cleared_record_leaves_the_approval_open`).
   The integration registers no `Notification` hook; `pohunek integration
   install` strips the ones an earlier release wrote.
 - A held record outranks the screen. Two working screen rules, `live_status_spinner`
@@ -436,7 +442,17 @@ open and the records stay authoritative
   `blocked`: the folder trust, theme, login, API-key and permission dialogs stay
   blocked, whatever a (forged or stale) record says. The API-key dialog is read
   by its own visible-blocker rule `api_key_approval_dialog`.
-- A held record ends with a root `state=clear`, with any detector
+- A held record is authoritative while fresh. The manifest declares
+  `stale_after_ms = 30000`: a record that disagrees with the screen for
+  that long is stale and the screen decides until the next record. A healthy
+  session's next record arrives within milliseconds of an answered prompt or
+  a missed report, so the window never fires there; it bounds a stuck state
+  (a crashed status writer, a dropped record) to half a minute. The
+  disagreements are a `blocked` record over an idle or working screen with no
+  dialog, a `working` record over a weak blocker, and an `idle` record over a
+  working spinner. A visible dialog still wins at once, and a fresh record
+  restores record authority at once. A held record ends with a root
+  `state=clear`, with any detector
   reconfiguration (a nested agent exiting, a package refresh) and with the
   runtime. Initial-input readiness ignores the record: the prompt box decides.
 - With the probe answered Claude sets the plain title `Claude Code` in

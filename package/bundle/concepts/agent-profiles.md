@@ -308,6 +308,209 @@ use changes its revision, so a resume then needs `--accept-profile-change`.
 `--dry-run` prints the profile and its digest and writes nothing. The command is
 local only.
 
+`--options-file <path>` adds launch options: the path must name a regular
+file (not a symbolic link, FIFO or device), the file's only root key is
+`options`, and its `[options.<id>]` tables are written after `secret_env` and
+validated with the load rules of [Launch options](#launch-options); a refused
+table is `package_profile_unusable` and nothing is written.
+`pohunek plugin profile create <name> --preset-of <parent> [--opt
+OPTION=CHOICE]... [--locked]` (the wire method `package.create_preset`) writes
+a [preset](#presets) instead, validated as a launch resolves it, with the same
+`--replace` and `--dry-run` rules. `plugin profile list` shows a preset with
+the state `preset` and the detail `preset of <parent>`.
+
+`pohunek plugin profile rm <name> --digest <file digest> [--json]` (the wire
+method `package.remove_profile`) removes a profile or preset file through the
+daemon, only while the file still has the `file_digest` that
+`plugin profile list --json --all` reports; a file edited since is refused with
+`package_profile_digest_mismatch` and kept. A tool that created profiles, such
+as an onboarding Undo, records each name with its digest and passes both back.
+A built-in runtime such as `shell` (`package_profile_builtin`) and a runtime a
+package serves (`package_profile_package_runtime`) have no file to remove. A
+profile that a running session uses is refused (`package_profile_in_use`), and
+so is a parent that a preset names (`package_profile_has_presets`): remove the
+presets first, then the parent. Both refusals follow the file a name opens, so
+a session or preset that reaches the profile through an in-tree symbolic link
+or another spelling of the name holds it too, and the name passed to `rm` must
+be the stored one, exactly as `plugin profile list` shows it. A stopped session of a removed profile resumes
+only after the same profile is restored (`agent_profile_missing` until then).
+
+## Presentation labels
+
+A profile may carry two optional top-level keys that only change how it is
+shown, never what it launches:
+
+```toml
+base = "claude"
+display_name = "Night Shift" # trimmed free text, at most 128 bytes
+audience = "owner" # "owner", "agent" or "hidden"; absent means "owner"
+```
+
+Both keys live at the top level, before any `[table]`: a key with the same
+name written under `[env]` is an environment variable, not a label. Only
+the file stem is the agent identity — `--agent` and `session.new` accept no
+lookup by display name.
+
+`display_name` is the human label pickers, `session list` and
+`session inspect` show instead of the agent name. It must be non-empty after
+trimming, fit in 128 bytes, and contain no hidden or separator characters; an
+invalid value is `invalid_profile` at launch, like any other bad key. `audience`
+marks who the profile is for: `owner` (the default) keeps it in owner pickers,
+`agent` marks a profile meant for agent-driven launches, and `hidden` hides it
+everywhere. Neither key enters the profile revision, so adding, editing or
+removing a label never triggers `agent_profile_changed`, never makes a
+relay approval stale, and never needs `--accept-profile-change`.
+
+`host.inspect` reports the labels on each resolvable profile's `runtimes`
+entry (`display_name` only when set, `audience` only when the file sets it —
+absent on the wire means `owner`; bare runtimes carry neither), and `session list`/`session inspect` report the session's current
+label live as `agent_display_name` (absent when the profile sets none, or no
+longer resolves). See the public API reference for the wire shape.
+
+## Launch options
+
+A profile may offer a few closed choices a launch picks from, for example the
+model, the effort level or a permission mode. Each `[options.<id>]` table has a
+label, a default and its choices; a choice adds launch arguments, environment
+entries and an optional `min_runtime` floor:
+
+```toml
+base = "claude"
+args = ["--shared"]
+
+[options.model]
+label = "Model"
+default = "opus"
+choices.opus   = { label = "Opus",   args = ["--model", "opus"] }
+choices.sonnet = { label = "Sonnet", args = ["--model", "sonnet"] }
+choices.next   = { label = "Next",   args = ["--model", "next"], min_runtime = "2.2.0" }
+
+[options.subagents]
+label = "Subagent model"
+default = "haiku"
+choices.haiku   = { label = "Haiku", env = { CLAUDE_CODE_SUBAGENT_MODEL = "haiku" } }
+choices.inherit = { label = "Same as main" }
+```
+
+A launch selects one choice per option: `pohunek session new --opt
+model=sonnet` (or `agent_options` on `session.new`) names the choices, and
+every option it does not name takes its default. The selected choices' args
+follow the profile `args` in option-id order (here `subagents` after `model`),
+and their env joins the profile `[env]`, so every rule a launch applies to
+profile args and env applies to them too (the trusted-checkout arguments, the
+integration launch-argument checks, the secret-slot collision check).
+`pohunek plugin profile show <name>` lists the options and which choices are
+available.
+
+The load rules (`invalid_profile` names the option, choice, env key or argument
+index, never a value or label text):
+
+- option and choice ids use the agent-name characters (letters, digits, `.`,
+  `_`, `-`, no leading `.` or `-`, no `..`), at most 64 bytes;
+- at most 16 options, and 1 to 32 choices per option;
+- labels are 1 to 64 bytes after trimming, without hidden or separator
+  characters, and `default` names one of the option's choices;
+- a choice env key is an upper-case variable name that is not `POHUNEK_*`
+  (refused, never stripped), a service-manager variable, a dynamic-loader
+  variable (`LD_*`, `DYLD_*`), a variable the launch sets itself (`PATH`,
+  `HOME`, `TERM`, `TMPDIR`, `USER`, `LOGNAME`, `SHELL`, `LANG`), the runtime's
+  config home variable, a `[launch_env]` name of the runtime, one of the
+  profile's `secret_env` slots, a key of its `[env]`, or a credential-style name
+  (`*_TOKEN`, `*_KEY`, `*_SECRET`, ...). Two choices of one option may set the
+  same key (they are alternatives); choices of different options may not;
+- a choice env value and a choice argument must not look like a credential
+  literal (vendor token, JWT, PEM block, authorization header, URL password);
+- `min_runtime` is a version the runtime's version probe can report.
+
+A choice with `min_runtime` is available only when the runtime's probed version
+is at least that floor. A runtime without a version (no version probe, the
+host shell, a probe that gave none) makes every floored choice unavailable:
+the check fails closed. `session.new` refuses an unavailable choice with
+`agent_option_choice_unavailable`; floors are checked when a session is
+created, not when it resumes.
+
+A session records the choice of every option it launched with, defaults
+included (`agent_options` on `session list` and `session inspect`), and
+resumes with exactly those choices. The profile revision covers the selected
+choices, not the whole `[options]` table: relabelling, changing a default,
+adding a choice or editing a choice the session did not select resumes
+without a decision, while editing a selected choice is `agent_profile_changed`
+(with `--accept-profile-change` the relaunch keeps the frozen arguments and
+takes the choice's current env). Adding an option is a change as well: with
+`--accept-profile-change` the relaunch records the new option's default in
+`agent_options` and applies that choice's env, but not its arguments: the
+relaunch keeps the frozen arguments, and the choice's arguments apply only to
+a fresh session. A later change of that default resumes without a decision. A recorded choice the profile no longer
+declares fails with `agent_option_choice_missing`, also with the flag: start a
+new session instead.
+
+The profile bounds which choices exist, not who may pick them: any client
+allowed to start a session of the profile may select its most permissive
+choice (a permission mode included). Declare the least-privileged choice as
+the default, and leave out a choice you do not want any caller to have.
+
+## Presets
+
+A preset is a profile file that names a parent profile and a selection of its
+options, so an old profile name can keep working as a choice of one parent
+instead of a full copy of its launch keys:
+
+```toml
+display_name = "Claude Sonnet (review)"   # optional
+audience = "hidden"                        # optional
+[preset]
+parent = "claude"
+locked = true                              # optional, default false
+[preset.options]
+model = "sonnet"
+effort = "med"
+```
+
+A file whose root holds a `[preset]` table is a preset. It may hold only
+`[preset]`, `display_name` and `audience`; any launch key (`base`, `args`,
+`env`, `program`, `secret_env`, `options`, `package`, `digest`, `manifest`,
+`resume`, `input_rules`) is `invalid_profile`. `parent` must name a full host
+profile file: a bare runtime, a missing file or another preset is refused,
+and so is an option or choice the parent does not declare. Presets do not
+nest.
+
+A preset launches exactly as its parent with the merged selection: the
+parent's defaults, then the preset's choices, then what `session new --opt`
+selects. A `locked` preset refuses any selection (`agent_options_locked`) and
+shows no options in `host.inspect` or `plugin profile show`; an unlocked one
+shows the parent's options with its own choices as defaults. The session's
+agent is the preset's name, and `display_name` and `audience` are the preset's
+own. A preset carries no package pin: its sessions launch from the parent's,
+`plugin profile migrate` refuses a preset (migrate its parent), and a release
+step that repins the parent judges the preset's sessions too.
+
+A preset session records every option's choice like any other and resumes
+with them, so changing the preset's choices affects new sessions only.
+Editing the preset's labels or `locked` resumes without a decision; editing
+the parent's selected choice, or pointing the preset at another parent, is a
+profile change (`agent_profile_changed`).
+
+Turning an existing full profile into a preset of the same name also changes
+its sessions' revision: a preset's revision never equals one frozen from a
+full profile, so each session of that name needs one `session resume
+--accept-profile-change`. Keep an old profile file until its sessions are
+gone, and give a name that live sessions still use to a preset only when none
+holds it.
+
+### Folding a profile family
+
+`pohunek plugin profile fold <name> <name>... --into <parent> --dry-run`
+proposes such a family from existing profiles and writes nothing. The inputs
+must agree on every launch key but `args` and `[env]` and must not be presets
+or declare options. Each flag group of `args` that differs between them
+becomes an option named after the flag, with one choice per variant and
+`none` where an input lacks the flag; an `[env]` key whose value differs
+becomes an `env-<key>` option. The output is the parent profile text, one
+preset text per input that reproduces it, and a check per input (`args equal`,
+or `args reordered` when a varying flag stood before a shared one). Env values
+never appear: each is a `"<value of KEY from PROFILE>"` placeholder to fill in
+by hand, and an argument that looks like a credential refuses the fold.
+
 ## Native recovery spec
 
 A native-session launch spec states how an agent CLI resumes one of its own

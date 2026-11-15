@@ -117,6 +117,7 @@ The features this core implements:
 | `checkout-trust-args-v1` | 0.40.0 | `[runtime] trusted_checkout_args`, `trusted_checkout_paths` |
 | `integration-cline-hook-v1` | 0.40.0 | `integration.handler = "cline-hook-v1"` |
 | `program-status-gate-v1` | 0.41.0 | detection manifest `[program_status] authority_from` and rule `below_authority` (no descriptor key; the package lists it so an older core refuses it) |
+| `program-status-staleness-v1` | 0.43.0 | detection manifest `[program_status] stale_after_ms` (no descriptor key; the package lists it so an older core refuses it) |
 | `package-context-v1` | 0.41.0 | `[context]` |
 | `version-probe-open-range-v1` | 0.42.0 | `version_probe` with `min` and no `below` |
 | `detect-composer-absent-v1` | 0.42.0 | detection manifest rule matcher `composer_absent` (no descriptor key; enforced against the manifest the descriptor names) |
@@ -580,56 +581,55 @@ hook_schema = "identity-subagent-v1"
 
 Core owns the schemas: `identity-v1` (identity, release, notification; only the
 PTY root itself, reporting in process while it runs the frozen launch
-entrypoint, may set or update the launch identity) and
-`identity-subagent-v1` (the same plus subagent start and stop, the subagent
-snapshot and, for Claude only, the prompt-accepted report; the launch identity
-comes from the earliest process named for the provider, or running a native-installer release image `<provider>/versions/<release>`). Under
-`identity-subagent-v1` a hook, which runs as a descendant of the launch
-process, files that process's report, so any process the launch process
-starts can file it: the agent's process tree runs as the owner and is not an
-identity boundary. On the worker path only `identity-v1` binds the root's
-report to the root's own kernel peer; the public `session.report_native_id`
-fallback admits only the PTY root's own process and refuses `identity-v1`
-sessions. A package only
-names one; it cannot carry schema contents, add actions, or relax validation.
-The `identity-v1` launch rule requires the entrypoint's shebang interpreter to
-run the script itself. An interpreter that re-executes another image, such as a macOS
-framework Python stub or an `xcrun` shim like `/usr/bin/python3`, leaves the
-session without a launch identity: every claim is refused as
-`image_mismatch` or `cmdline_mismatch` (a `worker.launch_identity.rejected`
-warning in the worker log). The runtime still runs, but native resume is
-unavailable for that session.
+entrypoint, may set or update the launch identity) and `identity-subagent-v1`
+(the same plus subagent start and stop, the subagent snapshot and, for Claude
+only, the prompt-accepted report; the launch identity comes from the earliest
+process named for the provider, or running a native-installer release image
+`<provider>/versions/<release>`). Under `identity-subagent-v1` a hook, which
+runs as a descendant of the launch process, files that process's report, so any
+process the launch process starts can file it: the agent's process tree runs as
+the owner and is not an identity boundary. On the worker path only `identity-v1`
+binds the root's report to the root's own kernel peer; the public
+`session.report_native_id` fallback admits only the PTY root's own process and
+refuses `identity-v1` sessions. A package only names one; it cannot carry schema
+contents, add actions, or relax validation. The `identity-v1` launch rule
+requires the entrypoint's shebang interpreter to run the script itself. An
+interpreter that re-executes another image, such as a macOS framework Python
+stub or an `xcrun` shim like `/usr/bin/python3`, leaves the session without a
+launch identity: every claim is refused as `image_mismatch` or
+`cmdline_mismatch` (a `worker.launch_identity.rejected` warning in the worker
+log). The runtime still runs, but native resume is unavailable for that session.
 `plugin install` and `plugin install --yes` refuse a descriptor whose schema id
 or handler id core does not provide, or whose handler does not drive the schema
 (`descriptor_invalid`), before anything is recorded. A package without
-`[integration]` (Pi) has no schema, and its sessions accept no hook report.
-The worker orders identity claims and releases per reported process (pid and
-kernel start identity): a claim or release must carry a sequence newer than
-every claim and release the worker accepted for that same process. Reports of
-different processes are never compared, so a nested agent's claim, even at
-`u64::MAX`, never makes the launch agent's later claim stale; the latest
-accepted claim is the active identity. A release answered `ok: false` because
-its process is not active still orders that process's later claims. The worker
-keeps every live reporter's sequence and never evicts it; when live reporting
-processes other than the PTY root and the launch process fill its bound (16), a
-further process's report is refused with reason
-`identity_reporters_exhausted` until one of them exits (an exited process its
-parent has not reaped no longer counts). The launch process's own report with a
-native reference is verified as a launch claim even at the bound, and kept when
-it establishes the launch identity (a deferred verification keeps only the
-pending launch claim, which the retry can still establish). A claim's sequence must therefore be
-strictly increasing across every hook event that reports the same process. The
-core Codex and Claude hooks run a short-lived interpreter per event, so they
-read the host's system-wide monotonic clock in nanoseconds (`CLOCK_MONOTONIC`)
-with Python's `time.clock_gettime_ns(time.CLOCK_MONOTONIC)`, because
-`time.monotonic_ns()` is defined only within one process (Apple's Python 3.9
-on macOS counts it from interpreter start). The Hermes reporter stamps its
-claims in its long-lived plugin process from `time.monotonic_ns()`, kept
-strictly increasing by a counter.
-A package whose reference is `assigned` and that also declares an integration can
-report its conversation: a validated report replaces the assigned reference and
-labels it `reported` (a `/clear` or in-session resume is followed), while a
-package without an integration keeps its `assigned` reference.
+`[integration]` (Pi) has no schema, and its sessions accept no hook report. The
+worker orders identity claims and releases per reported process (pid and kernel
+start identity): a claim or release must carry a sequence newer than every claim
+and release the worker accepted for that same process. Reports of different
+processes are never compared, so a nested agent's claim, even at `u64::MAX`,
+never makes the launch agent's later claim stale; the latest accepted claim is
+the active identity. A release answered `ok: false` because its process is not
+active still orders that process's later claims. The worker keeps every live
+reporter's sequence and never evicts it; when live reporting processes other
+than the PTY root and the launch process fill its bound (16), a further
+process's report is refused with reason `identity_reporters_exhausted` until one
+of them exits (an exited process its parent has not reaped no longer counts).
+The launch process's own report with a native reference is verified as a launch
+claim even at the bound, and kept when it establishes the launch identity (a
+deferred verification keeps only the pending launch claim, which the retry can
+still establish). A claim's sequence must therefore be strictly increasing
+across every hook event that reports the same process. The core Codex and Claude
+hooks run a short-lived interpreter per event, so they read the host's
+system-wide monotonic clock in nanoseconds (`CLOCK_MONOTONIC`) with Python's
+`time.clock_gettime_ns(time.CLOCK_MONOTONIC)`, because `time.monotonic_ns()` is
+defined only within one process (Apple's Python 3.9 on macOS counts it from
+interpreter start). The Hermes reporter stamps its claims in its long-lived
+plugin process from `time.monotonic_ns()`, kept strictly increasing by a
+counter. A package whose reference is `assigned` and that also declares an
+integration can report its conversation: a validated report replaces the
+assigned reference and labels it `reported` (a `/clear` or in-session resume is
+followed), while a package without an integration keeps its `assigned`
+reference.
 
 The handler is compiled core code selected by the descriptor's
 `integration.handler`: `pohunek integration install`, `status`, `doctor`, and
@@ -1006,7 +1006,11 @@ dir = "bundle"   # package-relative directory that holds the files
 ## Declaring a version probe
 
 A descriptor names the supported release range with `version_probe` in
-`[runtime]` (full reference in `docs/public-api.md`). Pick the parser by what
+`[runtime]` (full reference in `docs/public-api.md`). The probed release is
+also what a profile option choice's `min_runtime` floor is compared with
+([Agent profiles](../concepts/agent-profiles.md#launch-options)): a runtime
+without a version probe reports no version, so every floored choice of a
+profile over it is unavailable. Pick the parser by what
 `<program> <args>` prints on its first line:
 
 - `semver-v1` when it prints exactly `MAJOR.MINOR.PATCH` (Pi).
@@ -1209,6 +1213,7 @@ A detection manifest opts in to OSC 7501 program-status evidence with a table:
 app = "my-agent"      # 1-32 characters of [A-Za-z0-9_.+-]
 answer_probe = true   # optional, default false
 authority_from = "1.2.0"   # optional MAJOR.MINOR.PATCH
+stale_after_ms = 30000   # optional 1..=3600000, milliseconds
 ```
 
 `authority_from` makes the records authoritative only for a runtime release at
@@ -1216,6 +1221,18 @@ or above it, as probed by the launch's `version_probe`; below it, or with the
 release unknown, the worker answers no probe, records are ignored and the
 screen decides. Without the key the records are authoritative for every
 release.
+
+`stale_after_ms` bounds how long a held record may disagree with the screen
+before the screen decides: a `blocked` record over an idle or working screen
+with no dialog, a `working` record over a weak blocker, an `idle`/`done`/`error`
+record over a working spinner. While stale the detector arbitrates as if no
+record were held, until the next root record. Every transition and
+`agent_state` event published under the fallback carries the frozen fallback
+(`record_state`, `record_age_ms`, `rule_id`, `screen_state`), and
+`session.detection` reports it in its status; only their presence matters,
+program text never travels in them. Only the manifests that need it
+declare the key; the feature `program-status-staleness-v1` owns it, so a
+package that declares it must require the feature.
 
 A rule may set `below_authority = true` (only with `authority_from`): it serves
 releases below the gate and is skipped for activity while the gate is open and a record is held, so
@@ -1470,6 +1487,7 @@ one state:
   repair, because it already names the digest; an unpinned one is then
   migrated.
 - `pin_not_installed`: the pinned digest is not installed.
+- `preset`: a preset of another profile, which carries no pin of its own.
 - `unreadable`: the file is a symlink or special file, is not owned by you, is
   group- or world-writable, is not valid TOML, or has an invalid `base`,
   `package`, or `digest`.
@@ -1486,6 +1504,18 @@ the package descriptor declares, so a base without that table takes no home
 refusals are `package_profile_exists`, `package_profile_digest_mismatch`,
 `package_profile_credential_literal` and `package_profile_dir_unsafe`. A daemon
 without the method (`package_create_profile_supported`) is sent nothing.
+`--options-file <path>` adds `[options]` tables (sent as `options_toml`, behind
+`package_create_profile_options_supported`), and `--preset-of <parent> [--opt
+OPTION=CHOICE]... [--locked]` writes a preset of an existing profile through
+`package.create_preset` (behind `package_create_preset_supported`) instead; a
+preset carries no pin, so `plugin profile migrate` refuses it and its parent
+is migrated.
+`pohunek plugin profile rm <name> --digest <file digest>` removes a profile
+through `package.remove_profile` (behind `package_remove_profile_supported`)
+under the same exclusive authority, so removing a profile that pinned a
+package releases that pin; a package-served runtime name itself has no file
+and is refused with `package_profile_package_runtime` (use `plugin disable` or
+`plugin uninstall`).
 
 `pohunek plugin profile migrate <name> [--digest <d>] [--yes] [--json]` pins
 the profile through the daemon's `package.bind_profile` method; the command

@@ -171,6 +171,12 @@ SDK helpers validate the timeout locally and fail closed with
 runtime-scoped evidence. Its recovery guidance says to read the screen before resending or pressing
 Enter, because the text may still sit unsent in the prompt or may already have
 been taken.
+`session.list` and `session.inspect` also report the activity cursor
+(`activity_epoch`, `activity_revision`) of the returned snapshot once activity
+was recorded, so an assistant that buffers `agent_state` events can tell which
+ones the snapshot already includes: a buffered event naming the snapshot's
+runtime (`worker_instance_id` and `runtime_generation`) and the same epoch
+whose revision is not greater is older than the snapshot.
 A Claude session also reports each submitted prompt through the
 `UserPromptSubmit` hook. A caller that opts in with `allow_prompt_accepted`
 (the CLI always does for a waited input) gets that report as the answer to a
@@ -289,6 +295,14 @@ the session is kept either way, and a delivery that fails before the submit is
 written rolls the create back as above. A host whose daemon does not advertise
 `session_new_input_ack_supported` is refused before the session is created.
 
+A session launched from a profile that declares options records the choice of
+every option it launched with, defaults included: `agent_options` on
+`session list` and `session inspect`, selected with repeatable
+`pohunek session new --opt OPTION=CHOICE` (or `agent_options` on
+`session.new`). The record survives a daemon restart and every resume
+relaunches with the same choices
+([Agent profiles](agent-profiles.md#launch-options)).
+
 A session can also carry owner metadata, set atomically at creation with
 repeatable `pohunek session new --meta key=value` flags (split on the first
 `=`, so a value may itself contain `=`; a missing `=`, an empty key, or a key
@@ -309,9 +323,7 @@ The `session.list` protocol request can filter this metadata with exact-value
 the complete value; presence also matches an empty value. Metadata filters
 combine with each other and existing session filters using AND semantics. Keys
 and values remain opaque strings and use the same validation as
-`session.set_metadata`. When a current Rust or TypeScript client targets a
-protocol-3 daemon, a metadata filter fails with
-`daemon/daemon_protocol_too_old` before the request is sent.
+`session.set_metadata`. Every client of the protocol window can send these predicates.
 
 The CLI exposes these predicates as repeatable `pohunek session list
 --meta-eq key=value` and `--meta-has key` options. Equality splits on the first
@@ -319,6 +331,8 @@ The CLI exposes these predicates as repeatable `pohunek session list
 predicates are all required to match, including contradictory values for the
 same key, which produce no sessions. These options affect selection only and do
 not add metadata to the human table or quiet output.
+
+A parent session can isolate the attention of everything spawned under it. Setting owner metadata `pohunek.attention.children` to `isolate` on the parent (through `session new --meta pohunek.attention.children=isolate`, or `session.set_metadata` later; the only accepted value, cleared by removing the key) withholds descendant attention from the chain above: a descendant gets no inbox record for its own blocked or approval attention, so no parent row, `Needs you` marker, tray count or owner notification names it, while its turn signals are still recorded and `session.wait_turn` keeps working. When parents nest, the nearest flagged ancestor above the session wins; without any flagged ancestor the attention rolls up. `session.list` reports the isolator on each affected row as `attention_isolated_by` (never on `session inspect`). The flag survives a daemon restart and a resume. The withhold applies to debounced attention only: an immediate `notification.create` naming the session without an attention or turn dedupe key is an explicit message and is still recorded, and records committed before the flag was set stay as they are.
 
 A session records which session created it. When `session.new` carries the request origin pair (`POHUNEK_SESSION_ID` and `POHUNEK_DAEMON_ID`;
 the CLI and the Rust client send the inherited pair unless the Rust client
@@ -330,7 +344,20 @@ request without an origin records nothing; `daemon_id` names the daemon instance
 that launched the spawner's runtime (an earlier instance on this host or another
 host) and is kept as received, never resolved against local sessions. `pohunek session list --spawned-by <session-id>` returns
 exactly the sessions that session spawned and combines with `--meta-eq`,
-`--meta-has` and `--filter` using AND semantics. The link is attribution written
+`--meta-has` and `--filter` using AND semantics. `--top-level` keeps only the
+roots: sessions with no `spawned_by`, plus orphans whose spawner is gone (its
+record was removed, or the origin names another host). Every `session list`
+answer reports the direct-child count as `children` on each entry (list-only:
+inspect, events and the store never carry it). `--tree` renders the listed
+sessions indented under their spawner, parents before children, orphans as
+roots. `pohunek session rm <id> --with-children` removes a session
+together with its descendants, deepest first: every descendant goes through
+the normal `session rm` safety with one exception (a live descendant is kept
+and never stopped; only the named root is stopped first like `session rm`
+stops it), a dirty-worktree node is held and keeps its ancestors even under
+`--accept-unconfirmed-cleanup`, a kept or refused node keeps its ancestors,
+a child added while the cascade runs is kept, and the tree is bounded at
+64 sessions. The link is attribution written
 by the host from the request origin, not a security boundary: a process of the
 same user can omit the origin variables, and then nothing is recorded.
 
@@ -369,7 +396,11 @@ acknowledges any `unread` `agent_blocked` and `approval_required` records for
 that session's `attention:<session_id>` key and drops the pending turn signal
 for `turn:<session_id>`. An `idle` observation alone does not resolve attention
 because an approval prompt can be technically idle while still requiring owner
-input. A session whose runtime is lost also resolves its attention records,
+input. An approval that a `blocked` record of the program (OSC 7501, or a
+`blocked` reading that names a kind) raised is the exception to the `working`
+rule: a `working` edge with source `process` (output no detection rule names,
+such as a redraw after the record was dropped) does not resolve it; only the
+program's next `working` record or a working screen rule does. A session whose runtime is lost also resolves its attention records,
 because no terminal is left to answer them. The projector derives no record for
 the loss or for any other state of the session (`session list` shows a failed,
 done or lost session). Resolved records are removed after `record_ttl_secs`
@@ -981,7 +1012,16 @@ invented and the stop fails; if the runtime's processes cannot be proven gone,
 the runtime is faulted instead of ended, the stop fails with
 `worker_operation_failed`, and the daemon handles it as a lost runtime
 (`runtime_lost_cleanup_unconfirmed` when its own sweep cannot confirm either).
-The worker log names each process that kept the cleanup open.
+The worker log names each process that kept the cleanup open, and its
+`worker.runtime.faulted` ERROR event names why the runtime faulted.
+
+A worker answers a stop once the runtime's terminal outcome is committed to its
+journal. When that commit is still pending after the worker's 10 s wait (a
+loaded host), it refuses the stop as retryable after the processes were already
+stopped; the daemon sends the same stop once more, which only waits up to
+another 10 s for the commit. A commit still pending after both waits fails the
+stop or removal with `worker_operation_failed`, and the pending stop intent
+decides the outcome once the commit lands.
 
 The same applies when the root exits on its own and such a helper keeps the
 terminal open past the drain window: the worker force-closes the output, sweeps
@@ -992,7 +1032,12 @@ runtime's marker does not outlive the runtime.
 
 `lost` means the worker or host runtime is gone and the PTY cannot be
 reattached. `conflict` means discovery found ambiguous or mismatched live
-identity; Pohunek quarantines it and does not kill a worker automatically. A
+identity; Pohunek quarantines it and does not kill a worker automatically. List,
+inspect and event responses report `generation_recorded` on a `conflict`
+runtime: `true` when the record names the worker generation the stop and
+remove prove, `false` otherwise. The session helpers hide the actions a
+`false` conflict cannot take, and the daemon refuses them with
+`session_runtime_conflict`. A
 `conflict` whose record names a worker generation is re-checked in the
 background (after 1 s, doubling to at most 60 s) while a worker still answers
 or its job is supervised: a pass never kills, the session stays `conflict`
@@ -1207,8 +1252,9 @@ key lives and dies with the session.
 - The same key with the same request returns the existing session with
   `replayed: true`. No hook runs and no input is injected; `worktree_source` and
   `prompt_delivered` belong to the first response and are absent.
-- The same key with another request (another `agent`, `input` or `metadata`)
-  fails with `session_request_conflict` and creates nothing. Only `cols`, `rows`
+- The same key with another request (another `agent`, `input`, `metadata` or
+  `agent_options` selection) fails with `session_request_conflict` and creates
+  nothing. Only `cols`, `rows`
   and `secret_env` values may differ: the fingerprint covers none of them, so a
   retry with another secret value replays the session with its original
   credentials.
@@ -1285,7 +1331,11 @@ start, naming the file.
 
 `pohunek session retention sweep --dry-run` reports exactly what the current
 policy selects without touching anything; `--apply` removes the selection, and
-`--limit` lowers the cap for that one sweep. A manual sweep works whether or not
+`--limit` lowers the cap for that one sweep. `--spawned-by <session-id>`
+narrows the sweep to the direct children of that session (orphans whose parent
+is gone included), `--session <session-id>` (repeatable) to the named
+sessions; the two selectors exclude each other and a selector that names
+nothing selects nothing. A manual sweep works whether or not
 automatic sweeps are enabled and never exceeds the policy's own cap.
 
 A sweep removes through the same path as `session rm`, so it stops a runtime
@@ -1581,48 +1631,50 @@ A hook reports the conversation id through the worker, and the worker accepts it
 as the launch claim only from the launch process the session's hook schema
 declares. Under `NamedForProvider` (`identity-subagent-v1`; it is also the core
 default for a session without a schema, which is never reached because such a
-session admits no hook report) that is the process named for the provider (or a native-installer release image
-`<provider>/versions/<release>`) that
-started first below the PTY root, never an interpreter such as `node`. Under
+session admits no hook report) that is the process named for the provider (or a
+native-installer release image `<provider>/versions/<release>`) that started
+first below the PTY root, never an interpreter such as `node`. Under
 `FrozenRootEntrypoint` (`identity-v1`, used by Hermes, whose `hermes` entrypoint
 is a Python script) it is the PTY root alone, reporting in process: the worker
-requires the kernel peer of the report to be the root's PID and start time, so
-a report naming the root from any other process, a descendant included, is
+requires the kernel peer of the report to be the root's PID and start time, so a
+report naming the root from any other process, a descendant included, is
 refused, and it accepts the root's report only while the root still runs the
 exact entrypoint and shebang interpreter the worker froze before spawning it.
 Every later conversation id of the root is verified the same way before it is
 journaled. On the worker path only this rule binds the root's report to the
-root's own kernel peer. Under `NamedForProvider` a hook reports as a descendant of the launch
-process, and a descendant's report naming the launch process counts as that
-process's report; every process in the agent's PTY subtree runs as the owner,
-so this rule attributes reports and does not authenticate them. Under every
-schema the worker refuses a report from a process that is neither the process
-it names nor a descendant of it (`peer_outside_subject`). The rule requires
-the entrypoint's shebang interpreter to run the script itself. An interpreter that re-executes another image, such as a macOS
-framework Python stub or an `xcrun` shim like `/usr/bin/python3`, leaves the
-session without a launch identity: every claim is refused as
-`image_mismatch` or `cmdline_mismatch` (a `worker.launch_identity.rejected`
-warning in the worker log). The runtime still runs, but native resume is
-unavailable for that session. Under `NamedForProvider`, a process named for the
-provider that the launch process started directly is accepted as well only in the provider's hook-helper role, which is
-a command line whose second argument is `app-server` for Codex (it runs its
-hooks from a `codex app-server` child of the launched `codex`); a provider
-without a declared helper role gets no exemption. An independent same-provider
-child, a deeper process, a sibling, a process of another name, and a process
-whose PID or start time no longer matches are refused, so an agent a tool command starts never speaks for the session. The
-first accepted claim is the initial reference. A later switch replaces it only
-when the launch agent reports a newer verified conversation. Only the
-`SessionStart` identity report carries a conversation
-id; a subagent's `SubagentStart` and `SubagentStop` reports and Claude's
-main-`Stop` subagent snapshot are separate claim types that never touch the
-reference. The daemon's public `session.report_native_id` fallback is attested
-against the kernel peer of its local connection: only the session's PTY root
-itself is admitted, so a descendant of the root reporting the root's pid and
-start identity is refused with `native_report_unattested` and records nothing.
-A session on the `identity-v1` schema refuses that method for every report, the
-root included, so its native reference comes only from the worker. Its runtime,
-process-identity, ordering and expiry checks still apply to an admitted report.
-The official Pi package is the worked example: see the [Pi runtime package](../guides/pi-package.md).
+root's own kernel peer. Under `NamedForProvider` a hook reports as a descendant
+of the launch process, and a descendant's report naming the launch process
+counts as that process's report; every process in the agent's PTY subtree runs
+as the owner, so this rule attributes reports and does not authenticate them.
+Under every schema the worker refuses a report from a process that is neither
+the process it names nor a descendant of it (`peer_outside_subject`). The rule
+requires the entrypoint's shebang interpreter to run the script itself. An
+interpreter that re-executes another image, such as a macOS framework Python
+stub or an `xcrun` shim like `/usr/bin/python3`, leaves the session without a
+launch identity: every claim is refused as `image_mismatch` or
+`cmdline_mismatch` (a `worker.launch_identity.rejected` warning in the worker
+log). The runtime still runs, but native resume is unavailable for that session.
+Under `NamedForProvider`, a process named for the provider that the launch
+process started directly is accepted as well only in the provider's hook-helper
+role, which is a command line whose second argument is `app-server` for Codex
+(it runs its hooks from a `codex app-server` child of the launched `codex`); a
+provider without a declared helper role gets no exemption. An independent
+same-provider child, a deeper process, a sibling, a process of another name, and
+a process whose PID or start time no longer matches are refused, so an agent a
+tool command starts never speaks for the session. The first accepted claim is
+the initial reference. A later switch replaces it only when the launch agent
+reports a newer verified conversation. Only the `SessionStart` identity report
+carries a conversation id; a subagent's `SubagentStart` and `SubagentStop`
+reports and Claude's main-`Stop` subagent snapshot are separate claim types that
+never touch the reference. The daemon's public `session.report_native_id`
+fallback is attested against the kernel peer of its local connection: only the
+session's PTY root itself is admitted, so a descendant of the root reporting the
+root's pid and start identity is refused with `native_report_unattested` and
+records nothing. A session on the `identity-v1` schema refuses that method for
+every report, the root included, so its native reference comes only from the
+worker. Its runtime, process-identity, ordering and expiry checks still apply to
+an admitted report. The official Pi package is the worked example: see the
+[Pi runtime package](../guides/pi-package.md).
 
 Recovery records written by earlier releases are completed when the daemon
 starts, so every such session stays listed with its recovery record. The

@@ -214,10 +214,10 @@ Release packaging and contributor verification:
   stays the declared MSRV floor. `.github/actions/setup-rust` installs it (or a
   job's dated nightly) in every workflow job.
 - `scripts/check-rust-toolchain-pin` — CI gate rejecting a floating channel
-  (`stable`, `beta`, undated `nightly`) or a direct `dtolnay/rust-toolchain`
-  use outside `.github/actions/setup-rust` in workflows and actions, and a
-  non-exact pin; `scripts/tests/test_rust_toolchain_pin.py` runs it on fixture
-  trees and the real tree.
+  (`stable`, `beta`, undated `nightly`) or a third-party Rust installer action
+  used anywhere (setup-rust installs the toolchain with its own `rustup`
+  invocation), in workflows and actions, and a non-exact pin; `scripts/tests/test_rust_toolchain_pin.py` runs it on
+  fixture trees and the real tree.
 - `scripts/bump-rust-toolchain` — moves the stable pin (`--stable X.Y.Z`)
   and the dated workflow nightly (`--nightly YYYY-MM-DD`) in one step; the
   bump PR also fixes new lints. `scripts/tests/test_bump_rust_toolchain.py`
@@ -442,7 +442,13 @@ Release packaging and contributor verification:
 - `scripts/changelog` — validates the `changelog.d/` fragments and folds them
   into the committed `CHANGELOG.md`; `notes` prints the release-body block.
 - `scripts/ci-evidence` — verifies successful Actions jobs and steps for an
-  exact commit, with optional dispatch and bounded polling.
+  exact commit, with optional dispatch; accepts the evidence run's union
+  with every recorded source run.
+- `scripts/ci-reuse` — decides which jobs a `tier=main` delta dispatch or a
+  `main` push reuses from the newest green legs of same-tree runs of this
+  repo (PR, push, tier=main dispatch, within 24h, fork never, recorded
+  `tested-tree-*`); allowlist in `scripts/ci-reuse.json`; push reuse is
+  gated by the `CI_REUSE_PUSH` kill switch (step-level, never `jobs.<id>.if`).
 - `scripts/provision-hermes-compat`
 - `scripts/tests/provision-hermes-compat.sh`
 - `scripts/smoke-hermes-plugin-release`
@@ -591,9 +597,11 @@ Agent runtime and profile resolution:
 - `crates/daemon/src/agent/native_launch.rs`
 - `crates/daemon/src/agent/native_reference.rs`
 - `crates/daemon/src/agent/profile.rs`
-- `crates/daemon/src/agent/credential.rs` — the credential-literal detector for profile inputs.
+- `crates/daemon/src/agent/credential.rs` — the daemon's path to the credential-literal detector of `crates/package/src/credential.rs`.
 - `crates/daemon/src/agent/profile/compose.rs` — composes the text of a new profile.
-- `crates/daemon/src/packages/create.rs` — `package.create_profile`.
+- `crates/daemon/src/packages/create.rs` — `package.create_profile` (with `options_toml`) and `package.create_preset`.
+- `crates/daemon/src/packages/remove.rs` — `package.remove_profile`: the refusals and the inode-bound removal of a profile file.
+- `crates/daemon/src/session/profile_use.rs` — which profiles running sessions use, and the create re-check under the launch guard.
 - `crates/daemon/src/agent/host/`
 - `crates/daemon/src/integration/agent_skill.rs` — the opt-in agent skill install, status and removal.
 - `crates/xtask/tests/no_special_dispatch.rs`
@@ -636,7 +644,10 @@ Runtime package archive format:
 - `crates/daemon/src/agent/profile.rs` — profile `package`/`digest` pins and `pinned_digests`.
 - `crates/protocol/src/package.rs` — `package.*` payloads and stable error codes.
 - `crates/cli/src/commands/plugin.rs` — `pohunek plugin list|inspect|install|link|update|select|enable|disable|uninstall|doctor`.
-- `crates/cli/src/commands/plugin_profile.rs` — `pohunek plugin profile list|migrate|create`.
+- `crates/cli/src/commands/plugin_profile.rs` — `pohunek plugin profile list|migrate|create|show`, including `create --options-file` and `create --preset-of`.
+- `crates/cli/src/commands/profile_fold.rs` — `pohunek plugin profile fold`: the proposal of a parent with options and one preset per input.
+- `crates/package/src/credential.rs` — the credential-literal detector the daemon's profile checks and `plugin profile fold` share.
+- `crates/daemon/src/agent/profile/preset.rs` — preset files: parsing, the parent read and the merged selection.
 - `docs/knowledge/guides/runtime-packages.md`
 - `docs/knowledge/guides/plugin-repositories.md` — the rule that new plugins live in their own repositories, naming, required CI, index admission and the release snapshot; the guard is `check_plugin_directories` in `crates/xtask/src/doc_drift.rs`.
 - `docs/knowledge/runbooks/runtime-package-recovery.md` — recovery from failed package verification, refused official installs, and disabled, removed or damaged pinned packages.
