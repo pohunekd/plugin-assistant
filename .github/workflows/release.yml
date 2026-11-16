@@ -15,9 +15,9 @@ permissions: {}
 
 jobs:
   release:
-    uses: zajca/pohunek/.github/workflows/plugin-release.yml@v0.43.0
+    uses: zajca/pohunek/.github/workflows/plugin-release.yml@v0.43.1
     with:
-      core-tag: v0.43.0
+      core-tag: v0.43.1
     permissions:
       contents: write
       id-token: write
