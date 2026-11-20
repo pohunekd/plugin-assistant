@@ -1,6 +1,6 @@
 schema = 1
 id = "pohunek.context.assistant"
-version = "0.43.1"
+version = "0.44.0"
 runtime_api = 1
 requires = ["package-context-v1"]
 

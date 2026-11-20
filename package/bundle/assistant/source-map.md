@@ -529,6 +529,13 @@ Daemon, sessions, integrations, and project state:
 - `crates/daemon/src/api/handler/session.rs`
 - `crates/daemon/src/session/mod.rs`
 - `crates/daemon/src/session/observation.rs`
+- `crates/daemon/src/session/rights.rs` — session rights: caller classification
+  by kernel peer (ancestry, worker-unit control group) and the descendant target
+  rule behind `session_right_denied`.
+- `crates/daemon/src/session/adopt.rs` — `session.adopt`: the owner-only parent
+  change and the cascade registration that refuses it inside a `remove_tree`.
+- `crates/daemon/src/agent/profile/rights.rs` — the profile `[rights]` table
+  (`owner_equivalent`, `spawn_profiles`).
 - `crates/daemon/src/session/turn_wait.rs` — `session.wait_turn`: edge-triggered
   selection, `targets_ended`, `cursor_reset`, per-target progress.
 - `crates/daemon/src/session/turn_events.rs` — the in-memory turn-event journal,
@@ -575,6 +582,7 @@ Daemon, sessions, integrations, and project state:
   own configured-hook listing, `git_hooks_env_conflict`).
 - `crates/daemon/src/store/mod.rs`
 - `crates/daemon/src/capabilities.rs`
+- `crates/daemon/src/capabilities/dispatch.rs`
 - `crates/daemon/src/integration/mod.rs`
 - `crates/daemon/src/integration/commit.rs`
 - `crates/daemon/src/integration/doctor.rs`
@@ -856,6 +864,10 @@ Workspace crates by role (every workspace crate has an entry in this map;
 - `crates/shape-guard/src/lib.rs` — dev-only persisted-shape guard helpers.
 - `crates/test-support/src/lib.rs` — test-only helpers: hermetic fixture roots
   and environments, binary resolution, bounded readiness waits.
+- `crates/plugin-kit/src/lib.rs` — `pohunek-plugin-kit`: `lint`, `build`,
+  `verify`, `detect-check`, `smoke` and `prove` for plugin repositories over
+  one package directory, on an isolated `--local-only` daemon reached through
+  a throwaway index (`isolated.rs`, `throwaway.rs`).
 
 Design inputs:
 

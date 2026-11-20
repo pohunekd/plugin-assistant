@@ -72,10 +72,22 @@ answers offline; a failing probe keeps the generic message. A program that does 
 or any other runtime but a bare host shell, returns `agent_binary_missing` at the
 same point, before any probe runs; that refusal names only the program's file
 name. The probe clears ambient user state except the launch `PATH` and uses
-private temporary HOME, XDG, temporary and working directories. Pohunek canonicalizes
-the executable once and launches that exact absolute path without another PATH
-lookup. A same-owner replacement of the canonical file between probe and exec
-remains within the documented single-operator trust boundary. A runtime package can declare its own supported range with a data-driven probe
+private temporary HOME, XDG, temporary and working directories. Pohunek keeps
+the lexical path the trusted resolver returned and launches that absolute path
+without another PATH lookup, so a symlink stays a symlink and `argv[0]` keeps
+the configured name. A same-owner replacement of the file between probe and exec
+remains within the documented single-operator trust boundary. When the
+resolved path is a version-manager shim (a symlink to the `mise` manager under
+another name), the daemon first asks mise read-only, starting in `/`, which
+installed executable the shim would run and probes that file in the private
+sandbox, while the launch still goes through the shim link. Other `argv[0]` dispatchers
+behind a symlink (Volta, snap, a busybox-style multicall binary) are probed
+through their link in the private sandbox; they pass when they answer
+hermetically and are refused with the wrapper guidance otherwise. A project
+pin in any directory the lookup would otherwise walk through (including a
+project-local mise pin in the session working directory) does not change the
+probe: the lookup starts in `/` and reads the owner's global/system
+selection, while the launch may run the project's release. A runtime package can declare its own supported range with a data-driven probe
 (`version_probe = { parser = "semver-v1", args, min, below }`, or `semver-line-v1` with an extra
 `line` template such as `codex-cli {version}` for a banner that wraps the release, or
 `semver-revision-line-v1` for a `1.4.13-R2` release); the daemon applies the
@@ -94,7 +106,10 @@ launch `PATH` is inherited, not the profile's other environment values. The
 wrapper must answer that invocation in the underlying agent's declared format,
 without loading user configuration, requiring credentials or contacting a service.
 Forward the real agent's output rather than printing a made-up supported version.
-The probe's deadline and output limits still apply.
+The probe's deadline and output limits still apply. A version-manager shim is
+not a wrapper under this contract: it keeps its link name, and the daemon
+dispatches to the executable the manager names (starting in `/`) instead of
+expecting the link itself to answer hermetically.
 
 An unparseable answer and a failed probe include conditional wrapper recovery
 guidance in the launch refusal and doctor detail. A parsed release outside the
@@ -367,6 +382,60 @@ absent on the wire means `owner`; bare runtimes carry neither), and `session lis
 label live as `agent_display_name` (absent when the profile sets none, or no
 longer resolves). See the public API reference for the wire shape.
 
+## Session rights
+
+A profile may carry a `[rights]` table that says what the sessions launched
+from it may do to other sessions (see the [trust model](../safety/trust-model.md)):
+
+```toml
+base = "claude"
+
+[rights]
+owner_equivalent = true               # the tree has the rights of the owner's shell
+spawn_profiles = ["worker", "review"] # the profiles it may launch
+```
+
+`owner_equivalent` is meant for manager profiles: the sessions run with the
+owner's rights, so a manager session reaches sessions it did not spawn.
+`spawn_profiles` lists exact profile names; an empty list forbids spawning and
+an absent key leaves it unrestricted, except that a profile with
+`owner_equivalent = true` is launched from a plain session only when that
+session's list names it. An owner-equivalent session keeps its own list: with
+the example above it launches `worker` and `review` and nothing else, and
+`session.resume` of one of its descendants relaunches only a listed profile. A
+request that names a profile outside the list is refused with
+`session_right_denied` (`reason=spawn_profile_not_allowed`). A preset has the
+rights of its parent profile. `session.retention.sweep` from a session sweeps
+only its own subtree: a record outside it survives even when the policy
+selects it, and a named id outside it is not examined and not reported.
+
+The table is read from the profile file, never from a request, and an unknown
+key or an entry that is not a profile name is `invalid_profile`. A session
+holds the rights its profile had when it was launched or resumed, narrowed by
+the file as it reads when the daemon places a caller (once per connection) and
+when it checks a spawn. An edit that takes rights away applies to the running
+sessions from their next connection; an edit that adds rights applies to the
+sessions launched after it. A file the daemon cannot read, including one with
+unsafe permissions, grants nothing and forbids spawning. The launch rights are
+stored in the session record, so a session restored after a daemon restart
+holds the rights it was launched with, never more than the file allows now. A
+session recorded before the rights were stored takes the file as it reads at
+its first use. The
+table is part of the profile revision, so a change also asks for
+`--accept-profile-change` on the next resume.
+
+The package methods that write profile files (`package.create_profile`,
+`package.create_preset`, `package.remove_profile`, `package.bind_profile`) are
+owner only: a call from inside a session's process tree is refused with
+`reason=owner_only`. `plugin profile create <name> --base ... --replace`
+keeps the `[rights]` table of the file it replaces, because a profile
+definition carries none, and a preset cannot replace a profile that has one
+(`package_profile_unusable`). The profile files are still the owner's lever and,
+like every file of the same user, within reach of a same-user process that
+edits them directly. `plugin profile fold` reads `[rights]` like any other
+launch key: inputs whose tables differ cannot share a parent. A profile
+without the table has neither key.
+
 ## Launch options
 
 A profile may offer a few closed choices a launch picks from, for example the
@@ -501,8 +570,9 @@ holds it.
 
 `pohunek plugin profile fold <name> <name>... --into <parent> --dry-run`
 proposes such a family from existing profiles and writes nothing. The inputs
-must agree on every launch key but `args` and `[env]` and must not be presets
-or declare options. Each flag group of `args` that differs between them
+must agree on every launch key but `args` and `[env]`, `[rights]` included,
+and must not be presets or declare options. An equal `[rights]` table is
+carried to the proposed parent, because a preset takes its parent's rights. Each flag group of `args` that differs between them
 becomes an option named after the flag, with one choice per variant and
 `none` where an input lacks the flag; an `[env]` key whose value differs
 becomes an `env-<key>` option. The output is the parent profile text, one

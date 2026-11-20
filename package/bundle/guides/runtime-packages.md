@@ -122,6 +122,8 @@ The features this core implements:
 | `version-probe-open-range-v1` | 0.42.0 | `version_probe` with `min` and no `below` |
 | `detect-composer-absent-v1` | 0.42.0 | detection manifest rule matcher `composer_absent` (no descriptor key; enforced against the manifest the descriptor names) |
 | `agent-skill-v1` | 0.42.0 | `[agent_skill]` |
+| `prompt-arg-dash-paste-v1` | 0.44.0 | `[runtime] prompt_arg` (no new key; a package that needs the dash rule below before it sets `prompt_arg = true` lists the feature so an older core refuses it) |
+| `prompt-arg-word-paste-v1` | 0.44.0 | `[runtime] prompt_arg` (no new key; a package that needs the bare-word rule below before it sets `prompt_arg = true` lists the feature so an older core refuses it) |
 
 The core owns an append-only table of its features. A row is never removed or
 renamed, because a published descriptor may require it; the table equals a
@@ -345,6 +347,45 @@ it changes its digest. A session pinned to the earlier digest resumes
 without the name until it is adopted. A core older than 0.39 refuses the
 descriptor with `runtime_feature_unsupported` (0.38) or `descriptor_invalid`
 (0.37).
+
+## First prompt delivery
+
+With `[runtime] prompt_arg = true`, the first prompt of `session.new` is
+appended to the launch arguments as the last argv element, unless the prompt
+starts with `-` or is a single bare word: non-empty and made only of ASCII
+letters, digits, `-`, `_`, `.` and `:`. Such a prompt is never put in the
+argv. The core launches the agent without it and pastes it after readiness,
+the same way it delivers the first prompt of a runtime with
+`prompt_arg = false`, so an agent that parses options after positionals
+cannot read it as a flag, and one that dispatches a trailing bare word
+cannot run it as a subcommand (for example codex `logout`). Every other
+text keeps its argv delivery; a composer-special word such as `/compact`,
+`!make` or `@file` stays in the argv because it holds a character outside
+the set. A session launched through a profile always pastes its first
+prompt.
+
+A package that sets `prompt_arg = true` and relies on these rules lists
+`prompt-arg-dash-paste-v1` and `prompt-arg-word-paste-v1` in its top-level `requires` array,
+so a core without the rules refuses
+the package instead of passing a dash prompt as a flag or a bare word as a
+subcommand. A package that does not
+list them still gets the rules on this core.
+
+The pasted prompt is written once the runtime shows readiness (see
+[Declaring input readiness](#declaring-input-readiness)). Under the default
+`bracketed_paste` readiness, a silent agent gets the prompt when the startup
+grace ends, whether or not it reads input yet. For a client that sends
+`extended_input_ready_wait` (the current CLI and SDK) the non-strict wait
+lasts up to the longer of the host grace and the runtime's `[input]`
+`startup_grace_ms`, and a client without it keeps the compat bound
+(500 ms). So a runtime with `prompt_arg = true` declares a strict readiness
+rule (`[input] ready = "screen_idle"` or `"manifest_idle"`), under which
+`session.new` fails with `session_input_not_ready` and rolls back when
+readiness does not show. The exception is the kept blocked case: a strict
+readiness timeout while the agent reads `blocked` keeps the session of a
+hook-handshake runtime declaring the native existence check, succeeds with
+`prompt_delivered: false` and a pending initial input, and delivers the
+prompt once the operator answers and readiness shows.
 
 ## Trusted checkout arguments
 
@@ -581,7 +622,9 @@ hook_schema = "identity-subagent-v1"
 
 Core owns the schemas: `identity-v1` (identity, release, notification; only the
 PTY root itself, reporting in process while it runs the frozen launch
-entrypoint, may set or update the launch identity) and `identity-subagent-v1`
+entrypoint, may set or update the launch identity; only Hermes names it, and
+its worker verifies the claim against the entrypoint frozen at `Initialize`)
+and `identity-subagent-v1`
 (the same plus subagent start and stop, the subagent snapshot and, for Claude
 only, the prompt-accepted report; the launch identity comes from the earliest
 process named for the provider, or running a native-installer release image
@@ -818,6 +861,27 @@ repeating the command; the CLI never retries an install on its own.
   supplies (`sha256:<64 hex>` or the bare hex `sha256sum` prints). The archive
   carries no signature; the owner vouches for these exact bytes. This trust can
   never authorize an official runtime id such as `codex`, `claude`, or `hermes`.
+  It is also refused (with `package_runtime_not_claimable`) when the declared
+  runtime id belongs to a runtime id that a verified stored official index
+  has reserved (`pohunek plugin index refresh` records it); before any
+  verified index has listed `pi`, the documented Pi `--sha256` flow keeps
+  working.
+- A local install (`--sha256` or `plugin link`) refuses reserved runtime ids,
+  not a `pohunek.*` package id. The daemon applies no check to the package id
+  prefix on that path, and a package without a runtime (a context or commands
+  package) meets no reserved-id check at all. A local package therefore can
+  carry a `pohunek.*` id. The `origin` field of `pohunek plugin list --json`
+  and `pohunek plugin inspect --json` tells it apart from an official package:
+  `explicit_digest` or `link` for a local install, `official` only for a
+  package the signed catalog or the signed official index authorized. A
+  local install is refused a runtime id a recorded verified index reserves.
+  A local package installed before that reservation keeps serving, and
+  `pohunek doctor` warns with `runtime_id_reserved_by_official`. While such a
+  local package holds the runtime id, `pohunek plugin install <official id>`
+  is refused with `package_runtime_conflict`, whose `details.holder` names the
+  local package; nothing is replaced, so remove or replace the local package
+  first. Serving
+  refuses only the four compiled ids `shell`, `codex`, `claude` and `hermes`.
 - `--catalog <file>` authorizes an official package through the signed catalog,
   verified against the trust anchor file shipped beside the daemon (see the
   [runtime catalog](../concepts/runtime-catalog.md#trust-anchor-file)). A host
@@ -861,6 +925,16 @@ repeating the command; the CLI never retries an install on its own.
   before anything reaches the daemon. The review prints the resolved
   `<package-id>@<version>` and digest, and the command to repeat names that
   exact version.
+  The by-id install reads the daemon's stored copy when it is younger than 24h,
+  refreshes once when it is older, and with `--index-url` always fetches from that
+  URL and ignores the stored copy; `--index-url` with a different URL is a
+  transport replacement, not a trust root — the daemon still verifies it.
+  `pohunek plugin update <package> <archive> --index <file>` applies the same
+  checks and refuses an index older than the stored one
+  (`package_index_rollback`), an index that omits the archive's digest
+  (`package_untrusted`) and a digest a recorded catalog revoked
+  (`package_revoked`); the installed version stays selected and keeps
+  launching.
 - `link <dir>` copies a developer directory. The copy is installed disabled and
   unselected, and is recorded with the `link` origin.
 
@@ -1067,6 +1141,28 @@ file under a home the probe does not see, needs a launcher program whose
 version command answers without it; set the profile's `program` to that
 launcher.
 
+### Version managers
+
+A profile `program` may be a version-manager shim: a symlink to the `mise`
+manager under the agent's name (as `mise` writes them). The daemon keeps the
+lexical link path so the manager dispatches on the link name, asks the manager
+read-only which installed executable the shim would run (`mise which`, offline
+with no auto-install, starting in `/` under its own deadline), and probes that
+executable in the private sandbox; the launch still execs the shim link. An
+`identity-v1` runtime (Hermes) behind a shim fails closed with `ImageMismatch`:
+mise execs a different file than the frozen launch entrypoint, so the root's
+report cannot bind to it (see `identity-v1` above); Codex and Claude are
+unaffected because `identity-subagent-v1` binds reports to the launch process
+tree, not to the entrypoint file. A shim
+with no installed release is refused with `agent_runtime_unsupported` and a
+`recover` hint to run the agent once in a login shell; the version check never
+installs or updates a tool. This covers the owner's global/system selection
+only: a project pin in any directory the lookup would otherwise walk through
+(including a project-local pin in the session working directory) does not
+change the probed release, while the launch may run the project's release. Other `argv[0]`
+dispatchers behind a symlink are probed through their link in the private
+sandbox and pass when they answer hermetically there.
+
 ## Declaring input readiness
 
 The `[input]` table may declare `ready`, the signal that shows the agent reads
@@ -1255,6 +1351,17 @@ record held it is skipped, so the screen reads as it would without the rule
 so a package that ranks such a rule above a blocker also lists a 0.39.0 feature
 in `requires`, as the official Codex package does). The table and the flag are rejected when malformed, and a rule
 flag without the table is an error.
+
+A blocked rule that sets `visible_blocker = true` names a dialog the user must
+answer, drawn on the screen. It outranks a held record, and it holds `blocked`
+while the agent keeps writing output that changes no screen text (cursor
+moves, cursor show/hide, a redraw of the same frame), with or without a record
+held. A blocked rule without the flag (loose transcript text) and a
+title-sourced blocker alone do not: bytes over them read as working. A
+`visible_blocker` title or progress rule that outranks a dialog rule still holds
+`blocked` while the screen alone names a `visible_blocker` dialog; the state's
+source is then `osc_title` or `osc_progress`, the winning rule's. Set the flag on every rule that matches a
+real dialog.
 
 The record is arbitrated with the screen rules (a visible dialog always wins
 over a non-blocked record; a `blocked` record always wins; `working` reads

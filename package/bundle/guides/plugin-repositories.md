@@ -37,7 +37,11 @@ adds one (`plugin-directories`).
 
 Only the owner creates `pohunekd/*` repositories. An agent proposes one in an
 issue and waits for the grant. The `pohunek.` namespace and the
-`pohunekd/plugin-*` names are reserved to the official tier.
+`pohunekd/plugin-*` names are reserved to the official tier. The index admits
+only official entries under the `pohunek.` namespace; the daemon does not
+refuse a `pohunek.*` package id on a local install by digest or link (see the
+[trust model](runtime-packages.md#trust-model)), so check the `origin` of an
+installed package.
 
 ## Naming
 
@@ -74,15 +78,56 @@ A plugin repository created from the template holds:
 
 ## Required CI
 
-The template's CI is required on every pull request and is not edited away:
+The template's CI is required on every pull request and is not edited away.
+It calls the reusable
+`zajca/pohunek/.github/workflows/plugin-ci.yml@<core tag>`:
+
+| Input | Meaning |
+|---|---|
+| `core-tag` (required) | The core release tag the `release` row builds the kit from; it equals the tag in the caller's `uses:`. The workflow checks out that tag only, never a branch or a commit sha. |
+| `rows` (default `["release", "nightly"]`) | JSON list of rows to run: `release` (the kit from `core-tag`, smoked against that tag's attested daemon archive), `previous-minor` (the kit from the newest release of the previous minor, usable from core 0.45) and `nightly` (the kit from `main`). |
+| `platforms` (default `["x86_64-unknown-linux-gnu"]`) | JSON list of Rust target triples to smoke against: exactly `x86_64-unknown-linux-gnu` (Linux, runs on `ubuntu-24.04`) or `aarch64-apple-darwin` (macOS, runs on the pinned `macos-15` label). Any other value fails the job. The `release` row fetches the attested daemon archive per target; other rows build the daemon binaries from their own ref. |
+| `package-dir` (default `package`) | The package directory, a path below the repository root. A package submitted to the official index (`pohunekd/pohunek-plugin-index`) must live in `package/`: index admission rebuilds the archive from the `package` directory and refuses any other layout. Other repositories may set `package-dir` freely. |
+| `corpus-dir` (default empty) | The detection corpus directory, a path below the repository root holding `cases.toml`; empty skips `detect-check`. |
+| `upstream-install` (default empty) | A script, a path below the repository root, that installs the locked upstream into `$UPSTREAM_BIN` (an absolute directory the workflow creates and exports); the script must leave the directory existing and non-empty; empty skips the upstream install the smoke puts on `PATH`. |
+| `smoke-script` (default empty) | An executable, a path below the repository root, run once by the generic smoke after every generic check passed, inside the same live isolated root: bare `pohunek` reaches the isolated daemon through the isolated `XDG_RUNTIME_DIR` (the isolated prefix is first on the script's `PATH`), the live session id is under `POHUNEK_SMOKE_SESSION` (`POHUNEK_SOCKET_PATH` is exported only as information for hook-style clients), the isolated environment, the repository root as cwd (the smoke step runs with the plugin repository as its working directory); a non-zero exit fails the smoke; empty skips it. |
+| `smoke-script-timeout` (default empty) | The smoke-script bound in whole seconds, passed as `--script-timeout` when set: integer `1..=900`, absent keeps the kit default of 60 s. At most 900 s so the bound still fits the smoke step's `timeout-minutes: 30` (inside the `check` job's 60) with setup headroom. Refused for a context or commands-only package like `smoke-script`. |
+
+Every row and target runs one job with `contents: read`, no secret and no
+cache restore (Linux on `ubuntu-24.04`, macOS on the pinned `macos-15` label):
 
 - lint of the descriptor or manifest against the core schema and the runtime
-  features it requires;
-- a reproducible double build of the archive, then verification;
-- a smoke run of the built package against the core release and the nightly
-  core, from the plugin kit, in an isolated root;
-- the screen detection corpus for a runtime package;
+  features it requires; every kind lints through the same install-time
+  descriptor loader, and the lint line names the kind it saw: a runtime
+  package passes with `plugin lint ok: <package_id> <version> <runtime_id>`,
+  a context package with `... context` and a commands-only package with
+  `... commands`;
+- a reproducible double build of the archive with a byte compare, then
+  verification;
+- the screen detection corpus for a runtime package (only when `corpus-dir`
+  is set; never for a context or commands-only package: a caller that sets
+  `corpus-dir` for one fails);
+- a smoke run of the built package from the plugin kit, in an isolated root.
+  For a runtime package the generic smoke stops after the screen check and
+  runs the optional `smoke-script` on the same live isolated root only after
+  every generic check passed, so the plugin's own input and hook-event checks
+  see the exact host the generic smoke passed on. For a commands-only package
+  the smoke installs the archive on the isolated daemon by its digest and runs
+  every exported command once (`pohunek host command run local`); a command
+  that exits non-zero fails the smoke. A context package serves no runtime and
+  exports no command, so no smoke runs for it. A caller that sets
+  `smoke-script` or `upstream-install` for a context or commands-only package
+  fails with a named reason before the build, never a silent skip;
 - a version-bump check, so a changed archive carries a new version.
+
+What runs per kind:
+
+| Check | Runtime | Commands-only | Context |
+|---|---|---|---|
+| lint, double build, verify, version bump | runs | runs | runs |
+| detect-check (`corpus-dir`) | runs when set | input refused | input refused |
+| smoke | session start, screen check, `smoke-script` | install, every command run once | does not run |
+| `upstream-install`, `smoke-script` | run when set | input refused | input refused |
 
 A release is published on a version tag `vX.Y.Z` by the template's release
 workflow, which calls the reusable
@@ -91,11 +136,13 @@ workflow, which calls the reusable
 | Input | Meaning |
 |---|---|
 | `core-tag` (required) | The core release tag whose `xtask` builds the archive; it equals the tag in the caller's `uses:`. The workflow checks out that tag only, never a branch or a commit sha. |
-| `package-dir` (default `package`) | The package directory, a path below the repository root. |
+| `package-dir` (default `package`) | The package directory, a path below the repository root. A package submitted to the official index (`pohunekd/pohunek-plugin-index`) must live in `package/`: index admission rebuilds the archive from the `package` directory and refuses any other layout. Other repositories may set `package-dir` freely. |
 
 The workflow builds the archive with `cargo xtask plugin build` of that core
 tag in a job with read-only permissions, and requires the pushed tag to equal
-`v` plus the archive's version. A second job, which runs no build code, checks
+`v` plus the archive's version. The publishing job declares
+`environment: release`, so the caller repository's environment protection
+(tag rules, reviewers) gates every plugin release. A second job, which runs no build code, checks
 the checksums, attests `<package_id>-<version>.tar.zst`, and publishes it with
 `SHA256SUMS` as a GitHub release of the plugin repository; only that job has
 write access to `contents` and `attestations` and the OIDC `id-token`
@@ -112,9 +159,156 @@ The same two commands run locally:
   <dir> --evidence <file>` installs the archive through the index path on an
   isolated daemon started from the `pohunek`, `pohunekd` and `pohunek-sessiond`
   in `--release-dir`, and writes the verdict as evidence JSON. It never launches
-  the runtime program and never talks to your own daemon. The
+  the runtime program and never talks to your own daemon. A context entry
+  (`kind = "context"`) proves a context package with no runtime: the install
+  must report it official with the entry's digest, and enabled and selected
+  on the default path, while the inspect must report it enabled and selected
+  and read the package back
+  (for `pohunek.context.assistant` it also renders the assistant prompt
+  for the explicit `--agent prove-assistant` name, which skips auto selection
+  (the host reports no such agent), so the readback touches the installed
+  package; --print-prompt starts no session). The digest step refuses a
+  descriptor that carries a `[runtime]` table or no `[context]` table.
+  A `prove --no-enable` install stages a disabled install the inspect
+  predicate must refuse for being disabled, and a `prove --pre-install`
+  archive must name the entry's package id: any other installed version of
+  the same id leaves the proved version unselected, so the install check
+  refuses it on the default path and the inspect digest check refuses the
+  other, selected version under `--no-enable` (the inspect `selected`
+  check is defense in depth). The evidence of a
+  context proof carries
+  `"kind": "context"`. The
   [index runbook](../runbooks/plugin-index-keys.md#6-build-and-prove-a-plugin-archive)
   lists the steps, the evidence fields and the exit statuses.
+- `cargo xtask plugin features-check [--index <file>]` fails when a required
+  runtime feature is missing from the registry
+  (`crates/daemon/src/agent/host/fixtures/features.txt`, the same snapshot
+  the append-only guard compares `RUNTIME_FEATURES` against). It collects
+  `requires` from `runtime-packages/*/runtime.toml` and from every `runtime`
+  entry of an index document (the archive each entry lists is fetched from
+  its `url`, verified against the entry's digest and read for its descriptor;
+  a context entry is skipped). Without `--index` the official index v2 is
+  fetched; a failed fetch prints a `warn` naming the URL and the check
+  continues, so it never fails on the network alone.
+
+The `pohunek-plugin-kit` binary (`crates/plugin-kit`) offers the same
+operations for plugin repositories directly, one package directory at a time;
+every subcommand takes `--dir <package dir>` and reports through a
+`plugin <command> ok: ...` stdout line (`--json` switches to a single JSON
+document). Exit status is 0 for a pass, 1 for a failed proof or a refused
+index write, and 2 for every other refusal:
+
+- `lint` loads the descriptor through the same parser an install runs: a
+  runtime package passes with
+  `plugin lint ok: <package_id> <version> <runtime_id>`, a context package
+  with `plugin lint ok: <package_id> <version> context` and a commands-only
+  package with `plugin lint ok: <package_id> <version> commands` (`--json`
+  carries `"kind": "runtime"`, `"kind": "context"` or `"kind": "commands"`,
+  with no `runtime_id` for the last two). The kind is the export the
+  descriptor carries, never merely the absence of a runtime: a package that
+  exports a context is `context`, one that exports commands without a runtime
+  or a context is `commands`, and one that exports none fails with a named
+  reason.
+- `build` writes the canonical archive like `xtask plugin build`.
+- `verify --archive <file> [--dir <package dir>] [--sha256 <digest>]`
+  checks the archive rebuilds from the directory, twice, and matches the
+  digest; without `--dir` it only re-reads the archive, without `--sha256`
+  it only reports the digest.
+- `detect-check --corpus <dir>` replays every committed screen of the
+  corpus through the detector: `cases.toml` holds `[[case]]` tables with a
+  `screen` file under `screens/`, a `width`, and the expected `working`,
+  `blocked`, `idle` or `unknown` activity.
+- `smoke --release-dir <dir> [--upstream <path>] [--script <path>] [--script-timeout <seconds>] [--detection-timeout <seconds>]`
+  installs the built package on an isolated daemon through a throwaway
+  index, starts it, waits for detection past `unknown`, and requires a
+  non-empty screen; then it stops and removes the session. The generic
+  smoke stops after the screen check: no full agent run. A commands-only
+  package starts no session: the smoke installs its archive with
+  `pohunek plugin install --sha256`, runs every exported command once with
+  `pohunek host command run local`, requires exit 0 from each, and reports
+  `plugin smoke ok: <package_id> <version> commands <n> commands run`
+  (`--json` carries `commands` instead of `activity` and `screen_lines`);
+  `--upstream`, `--script`, `--script-timeout` and `--detection-timeout` are
+  refused for it. `--upstream` puts
+  a directory (or the directory of an executable) in front of the isolated
+  daemon's `PATH`, so the runtime program resolves to the locked upstream
+  install there. `--script` runs a plugin-owned executable once after every
+  generic check passed, inside the same live isolated root: a bare `pohunek`
+  reaches the isolated daemon through the isolated `XDG_RUNTIME_DIR` (the
+  isolated prefix holding `pohunek` is first on the script's `PATH`), the
+  live session id is under `POHUNEK_SMOKE_SESSION` (`POHUNEK_SOCKET_PATH` is
+  exported only as information for hook-style clients), and its stdout and
+  stderr both go to the kit's stderr, so `--json` stdout stays one JSON
+  document. The script runs in the kit's own cwd (the plugin repository the
+  caller starts the kit in), its process group is killed after it exits on
+  every path, and a non-zero exit fails the smoke naming the script and the
+  exit code. `--script-timeout` bounds the script in whole seconds
+  (`1..=900`, absent keeps the 60 s default); a script that outlives its
+  bound fails the smoke with an error naming the script and the bound, and
+  the passing `--json` report carries the effective bound as
+  `script_timeout_s`. `--detection-timeout` bounds the wait for the
+  detector to leave `unknown` in whole seconds (`1..=60`, absent keeps the
+  60 s default); it can only tighten the bound, so a value above 60 is
+  refused before the rig starts. A runtime that stays `unknown` past the
+  bound fails the smoke with an error naming the bound, and the passing
+  `--json` report carries the effective bound as `detection_timeout_s`.
+- `prove --release-dir <dir> --evidence <file> [--no-enable]` runs the same
+  install path as `xtask plugin prove` from the package directory and writes
+  the verdict as evidence JSON, plus the kit digest (`kit_sha256`); with
+  `--archive <file> --entry <entry.toml>` instead of `--dir` it proves the
+  admitted release asset against its real entry. `--json` reports the used
+  isolation root alongside the line, so a scenario can assert the root is
+  gone; a failed run names its isolation root on stderr as
+  `isolation root: <path>`: the kit has removed the root unless the
+  failure is the removal itself. A refusal before the root exists, or the
+  failure to write the evidence after the run, names no root.
+
+## Kit bundle
+
+Every core release and every nightly also ships the owner-side plugin kit
+bundle `pohunek-plugin-kit-<X.Y.Z>-<target>.tar.zst` for
+`x86_64-unknown-linux-gnu` and `aarch64-apple-darwin`. The bundle holds
+`pohunek`, `pohunekd`, `pohunek-sessiond` and `pohunek-plugin-kit` plus the
+descriptor schema note; it carries no release MANIFEST and never enters the
+core release bundle. A release bundle is attested with the other release
+assets; a nightly bundle is attested by the `attest-kit` job of
+`release-evidence.yml`. Verify a downloaded bundle with the same signer
+workflow the `plugin-kit-publish` job uses — the release bundle against
+its tag, a nightly bundle against `main`:
+
+```sh
+gh attestation verify <bundle> --repo zajca/pohunek \
+  --signer-workflow "zajca/pohunek/.github/workflows/release-evidence.yml" \
+  --source-ref refs/tags/vX.Y.Z --deny-self-hosted-runners
+gh attestation verify <bundle> --repo zajca/pohunek \
+  --signer-workflow "zajca/pohunek/.github/workflows/release-evidence.yml" \
+  --source-ref refs/heads/main --deny-self-hosted-runners
+```
+
+A bundle attested from any other ref — for example a `tier=nightly`
+dispatch on a branch — is not a kit release and must be refused.
+
+The `plugin-kit-publish` workflow publishes the bundles as releases of
+`pohunekd/pohunek-plugin-kit`: a core release tag `vX.Y.Z` becomes
+`core-vX.Y.Z` once the tag release is published (never a draft or a
+prerelease), a scheduled nightly CI run becomes the prerelease
+`nightly-YYYYMMDD-<sha12>` (nightlies older than 30 days are pruned). The
+provenance of every published bundle verifies with `gh attestation verify`
+against the `release-evidence.yml` signer workflow before the publishing
+token is minted. Until the owner has finished the setup below,
+publication stays gated and the bundles only build.
+
+Owner setup:
+
+- the `plugin-kit-publish` environment's deployment branch policy allows
+  `main` (the publishing job runs on the default branch even though the
+  environment gates the token step);
+- the kit repository's default branch is `main` and it carries an initial
+  commit (the tag is created with `--target main`);
+- `PLUGIN_KIT_APP_ID` is a repository or organization variable, not an
+  environment variable: the job `if:` is evaluated before the environment
+  applies, so an environment variable would skip the job silently;
+- the App private key is an environment secret of `plugin-kit-publish`.
 
 ## Compatibility declaration
 
@@ -146,14 +340,20 @@ install by id.
   other entry is admitted to the verified tier.
 - A plugin archive is accepted only when both of these hold:
   - `gh attestation verify <archive> --repo <source.repo> --signer-workflow
-    zajca/pohunek/.github/workflows/plugin-release.yml --signer-digest <commit
+    zajca/pohunek/.github/workflows/plugin-release.yml --signer-digest <object
     of the zajca/pohunek tag source.built_with> --source-ref
     refs/tags/<source.tag> --source-digest <source.commit>
-    --deny-self-hosted-runners` succeeds. The commit is resolved only through
-    the qualified tag ref of `zajca/pohunek` itself, never through a bare sha,
-    so a commit of a fork network cannot satisfy it. Whether `--signer-digest`
-    matches the commit of a reusable workflow is checked by the first plugin
-    release; admission is not trusted before that check has passed.
+    --deny-self-hosted-runners` succeeds. The signer digest is the object that
+    the qualified tag ref `refs/tags/<source.built_with>` of `zajca/pohunek`
+    points to: for an annotated tag it is the tag object, not the commit the
+    tag points to, and the commit is refused with `expected BuildSignerDigest`.
+    `gh api repos/zajca/pohunek/git/refs/tags/<tag> --jq .object.sha` prints
+    it. The tag is resolved only through that qualified ref of `zajca/pohunek`
+    itself, never through a bare sha, so a commit of a fork network cannot
+    satisfy it. Admission passes this check for a plugin built with a core
+    release tag: the `pohunek.runtime.muse` 0.1.0 entry (built with `v0.43.1`)
+    passed it in the index admission run for
+    `pohunekd/pohunek-plugin-index#10` (run 44729152089).
   - `cargo xtask plugin build` at `zajca/pohunek` tag `source.built_with`, run on
     `source.commit`, reproduces the entry digest. A build by other code cannot
     match this rebuild, so the `core-tag` input and the workflow commit do not
@@ -171,7 +371,8 @@ install by id.
   `predicate=<name>: <detail>`, where `<name>` is one of `schema`, `existing-tree`, `package-id-binding`, `refused-runtime-id`, `url-charset`, `identity-conflict`, `duplicate-digest`, `version-not-semver`, `version-not-release`, `duplicate-version`, `version-not-greater`, `core-range-unparsed`, `core-prerelease`, `core-excludes-core-tag`, `core-lower-bound` (the `Predicate` enum in
   `crates/xtask/src/plugin_index/admit.rs`).
 - Without admission, an owner can still install a published archive by its
-  digest (community tier); such an install never serves a reserved runtime id.
+  digest (community tier); such an install is refused a runtime id the daemon
+  reserves (see the [trust model](runtime-packages.md#trust-model)).
 
 ## Release snapshot
 
