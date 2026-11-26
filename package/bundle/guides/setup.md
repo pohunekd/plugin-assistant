@@ -64,7 +64,7 @@ registers one daemon job: the systemd user unit
 `pohunek-<ns>-daemon.service` plus the slice `pohunek-<ns>-sessions.slice` on
 Linux, or the launchd agent
 `~/Library/LaunchAgents/io.github.zajca.pohunek.<ns>.daemon.plist` on macOS.
-The owner-private `service.toml` (schema 7) records `[input]`
+The owner-private `service.toml` (schema 8) records `[input]`
 `initial_startup_grace_ms = 5000`, `submit_delay_ms = 150` and
 `write_stall_timeout_ms = 3000` on a fresh
 install. These host-wide values control the maximum wait for an input-ready
@@ -137,6 +137,18 @@ invalid or repeated entry makes the configuration load fail with the named key a
 position. An absent table or an empty list trusts no repository, which is also the state of
 a daemon started without `service.toml`. The installer omits the table while the list is
 empty, and a previous release reports it as an unknown table.
+`namespace.session_tmp_root` is the directory below which each session's private
+`TMPDIR` lives (`<root>/<store key>/<session id>`). A fresh install and an upgrade of
+a schema-7 file record `<cache_dir>/session-tmp` explicitly, so nothing moves until you
+edit the key (changing it does not move or clean up the directories of existing sessions under the old root: delete that tree yourself once no session uses it); point it at a short absolute path on another disk (for example `/t/st`)
+to keep session scratch off the cache filesystem, then restart the daemon. The
+installer creates the default root only, below the real path of the cache directory
+(a symlinked `~/.cache` is resolved, and an untrusted real path is refused naming it);
+a root you configured elsewhere is neither created nor judged by the installer. The daemon never creates the configured root,
+so create a root you chose yourself (mode 0700, owned by you, no symlink in the path)
+before the daemon needs it: while it is missing or unsafe a session launch fails with
+`session_tmpdir_failed` or `session_tmpdir_unsafe` naming it, the daemon keeps serving,
+and it logs one `session.tmp_root_unusable` warning at start.
 The `[events]` table bounds the event journal `<data>/events/events.jsonl`:
 `max_file_bytes = 33554432` (one file, `1048576..=1073741824`),
 `max_files = 8` (files kept including the active one, `2..=64`) and
@@ -261,7 +273,11 @@ matches this release from the signed plugin index, under the same consent: the
 daemon verifies the index and the archive digest, and every outcome without that
 verification (index unreachable or without the package, a document the daemon
 refuses, a daemon without the index channel) is a gap that ends the run with
-`setup_incomplete` and the manual command of `docs/install.md`.
+`setup_incomplete` and the manual command of `docs/install.md`. `pohunek service
+upgrade` installs the package itself after a committed upgrade to a newer version
+(`--no-assistant-package` skips it) and reports the outcome as `assistant.install`,
+with `not_published` and `pohunek setup` while the index does not list it yet;
+`pohunek assistant` prints a note for an older bundle.
 `--hooks none|all|<agent[:profile]>,...` (default `all`) limits the hooks to
 none or to the listed agent homes: the preview, the result and `--dry-run
 --json` then list only the selected homes (and the gaps about their profile

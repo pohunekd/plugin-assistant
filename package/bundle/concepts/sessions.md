@@ -401,7 +401,13 @@ input. An approval that a `blocked` record of the program (OSC 7501, or a
 rule: a `working` edge with source `process` (output no detection rule names,
 such as a redraw after the record was dropped) does not resolve it; only the
 program's next `working` record or a working screen rule does. A session whose runtime is lost also resolves its attention records,
-because no terminal is left to answer them. The projector derives no record for
+because no terminal is left to answer them, and so does removing the session.
+Once after startup reconciliation the daemon acknowledges every open attention
+record whose session is absent, stopped, done, failed or on a lost runtime
+(a record the previous daemon left open across an upgrade or a host restart); a
+live session keeps its record at startup, whatever its stored activity; the
+first `working` observation the new projector makes of it acknowledges the record,
+because the projector holds no earlier activity for the session. The projector derives no record for
 the loss or for any other state of the session (`session list` shows a failed,
 done or lost session). Resolved records are removed after `record_ttl_secs`
 (14 days by default).
@@ -1284,11 +1290,15 @@ key lives and dies with the session.
 ## Temporary directory
 
 Each session's agent runs with `TMPDIR` set to the session's own directory,
-`<cache_dir>/session-tmp/<store key>/<session id>` below Pohunek's cache
-directory (`$XDG_CACHE_HOME/pohunek` or the platform cache path), so agents
-running side by side never overwrite each other's temporary files. The store
-key comes from the metadata store's path, so two daemons with different stores
-never share a directory. The directory is private
+`<session_tmp_root>/<store key>/<session id>`, so agents running side by side
+never overwrite each other's temporary files. `session_tmp_root` is
+`namespace.session_tmp_root` of `service.toml`: by default `<cache_dir>/session-tmp`
+below Pohunek's cache directory (`$XDG_CACHE_HOME/pohunek` or the platform cache
+path), or another absolute path the operator chose, for example on a data disk. The
+store key comes from the metadata store's path, so two daemons with different
+stores never share a directory. The daemon never creates `session_tmp_root` (an
+unmounted disk would otherwise get the root in its empty mount point); the
+installer creates only the default one, and a root the operator set must exist. The directory is private
 (mode 0700) and replaces a `TMPDIR` forwarded from the daemon's environment. A
 profile that sets `TMPDIR` in its `[env]` keeps that value instead. Stopping a
 session keeps the directory and resuming it reuses it; removing the session,
@@ -1300,7 +1310,10 @@ rejected that names the session, a worker or its claimed session, a
 service-manager job or a worker journal names it. When it cannot tell, because
 worker discovery, the job listing or the journal scan failed, or a rejected
 store line names no session, it deletes nothing. A launch whose directory is not a private directory of the daemon's user fails
-with `session_tmpdir_unsafe` before the agent starts.
+with `session_tmpdir_unsafe`, and one whose `session_tmp_root` is missing with
+`session_tmpdir_failed`, before the agent starts; the message names the root,
+and the daemon keeps serving other sessions. The daemon logs one warning
+(`session.tmp_root_unusable`) at start when the root is missing or unsafe.
 
 ## Retention
 
@@ -1579,7 +1592,9 @@ hook schema may report, and the report replaces the stored value and its
 provenance (`reported`) in the session, its durable record and its resume
 binding, so `/clear` and in-session resume are followed and `session.resume`
 launches with the reported conversation. The declared existence
-check runs for a still-assigned reference. A hook runtime may declare the same
+check runs for a still-assigned reference and for a reported id of an assigned
+runtime, so a reported conversation whose file is gone is refused with
+`agent_native_reference_missing`. A hook runtime may declare the same
 kind of check under `[native_reference.existence]` for its id-kind reference;
 the official `claude` package declares one, so its recovery additionally requires a
 regular transcript file under its effective declared config home; either

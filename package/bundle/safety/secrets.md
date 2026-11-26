@@ -32,6 +32,28 @@ alongside the profile environment. They are not persisted, so a resume of
 a profile that declares `secret_env` slots is refused with `secret_env_missing`.
 The slot names come from the host profile, never from the wire.
 
+A subscription token of a Claude account is a secret the package keeps in an
+owner file under the accounts directory (mode 0600 in a 0700 directory), never in
+a profile `[env]` or a log. The launch wrapper places it in the environment
+of the Claude process it execs, never in argv; Claude's own subprocesses (Bash
+commands, hooks, stdio MCP servers) inherit it unless
+`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` is set, so the agent of that session can read
+it. And `plugin run` passes setup
+programs an allowlisted environment without any `POHUNEK_*` or credential-shaped
+variable, so a setup program cannot see another tool's credential. The owner
+checks the state directories with the package's `check-logs` command.
+
+A subscription token that a wrapper program reads (the account pattern of
+[choosing a credential with a launch option](../concepts/agent-profiles.md#choosing-a-credential-with-a-launch-option)
+and [one Claude subscription per session](../guides/claude-package.md#one-claude-subscription-per-session))
+belongs in an owner-only file or store that only the wrapper opens, never in a
+profile `[env]`, in `secret_env`, in a prompt, an issue or a log. Hand-written
+profile `[env]` entries are not refused for credential names, so keeping the
+token out of them is the owner's rule. The agent and every subprocess it starts
+inherit the exported variable, so a session that runs `env` or `printenv` writes
+it into its own transcript; the runtime's subprocess scrub, where it has one, is
+a trade-off the guide describes, not a guarantee.
+
 The assistant snapshot is allowlist-built. It may include filenames, existence
 status, parse status, selected action names, structured command output, and
 warnings. It must not collect process environment variables, profile env values,

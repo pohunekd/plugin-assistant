@@ -531,10 +531,15 @@ is refused the same way.
 `--accept-runtime-loss` is the one consent for the service-managed upgrade below;
 there is no second flag. See [debug session runtime](debug-session-runtime.md).
 
-After a core upgrade, move the assistant context package to the version that
-matches it: `pohunek plugin update pohunek.context.assistant <archive> --sha256
-<digest>` installs and selects it (a plain `plugin install` leaves the old version
-selected); see `docs/install.md`, "Install the assistant package", and the
+After a core upgrade, the assistant context package moves to the version that
+matches it. `pohunek service upgrade` installs the version the plugin index
+lists for the new core and prints an `assistant` line (and `--json` an
+`assistant` object with `install.result`). An index that does not list it yet
+gives `not_published`, and `pohunek setup` installs it later; a package you
+disabled or did not select stays as set; `--no-assistant-package` skips the
+step on a host without access to the index. When the index cannot be
+reached, rerun `pohunek assistant setup` (or `pohunek setup`) once it can;
+see `docs/install.md`, "Install the assistant package", and the
 [context package guide](../guides/runtime-packages.md#declaring-a-context-package).
 When the assistant feature is available, its update intent should compare the
 snapshot's `pohunek_version` and the package version in the prompt with the
@@ -760,7 +765,10 @@ the upgrade is not what ends it.
   pinned to a package digest, or a built-in that a 0.34.0 to 0.34.2 store (schema
   5) adopts into the official package whose check equals the v0.34.2 golden. Any
   other session the upgrade adopts from the built-in runtime is `would lose
-  recovery`, with the same code and a detail that names the reason. Sources
+  recovery`, with the same code and a detail that names the reason. A reported
+  id of an `assigned` runtime whose file is missing is `already not
+  resumable`: the running release only starts an empty conversation under it,
+  so the upgrade loses nothing and needs no flag. Sources
   outside those are fail-closed, so the verdict is `would lose recovery` there.
 - `would not be adopted`: the new daemon would not manage the worker
   (`record_unreadable`, `worker_without_session_record`, `store_unusable`,

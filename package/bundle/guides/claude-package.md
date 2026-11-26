@@ -9,8 +9,9 @@ intents: [setup, update, debug, help]
 
 # Claude Code runtime package
 
-The Claude package (`runtime-packages/claude`: `runtime.toml` and `detect.toml`,
-nothing else) is the only source of the Claude Code runtime: the daemon compiles
+The Claude package (`runtime-packages/claude`: `runtime.toml`, `detect.toml`,
+and the account tool `bin/claude-accounts` with its launch wrapper
+`bin/claude-account-wrapper.sh`) is the only source of the Claude Code runtime: the daemon compiles
 no Claude in. It is the package form of the built-in Claude runtime that
 releases up to 0.34.x compiled in. Its compatibility lock and the screens captured from a
 real Claude Code are in `compat/claude/`. See [runtime
@@ -83,7 +84,7 @@ On a host without the package nothing serves `claude`:
 
 ## What the package declares
 
-The package is version `2.1.0`. Every descriptor fact below equals the
+The package is version `2.3.0`. Every descriptor fact below equals the
 built-in Claude descriptor release 0.34.2 shipped (package version `1.0.0`),
 except the version probe, the transcript tree (`[transcripts]`), the input
 readiness (`[input] ready`) and the session name arguments (`[naming]`), which
@@ -139,6 +140,9 @@ dropped rules.
   `identity-subagent-v1`. The package names the compiled handler and schema; the
   hook reporter scripts stay core-owned, so the archive carries no asset.
 - Config home: `CLAUDE_CONFIG_DIR`, else `~/.claude`.
+- Setup: `requires` lists `package-setup-v1`, and `[setup.accounts]` names
+  `bin/claude-accounts`, the owner's account tool. `pohunek plugin run` is the
+  only way it runs ([One Claude subscription per session](#one-claude-subscription-per-session)).
 - Detection (`detect.toml`): process matchers are the kernel name `claude` or
   `claude.exe`, a command line whose first argument is `claude` or
   `claude.exe` (with or without a directory), or a command line whose first
@@ -159,6 +163,103 @@ dropped rules.
   first-run theme picker, API-key approval and login method list, and the
   folder trust dialog mean `blocked`. The package declares no terminal title
   rules.
+
+## One Claude subscription per session
+
+A session that must run under a given subscription starts from its own
+profile. The owner registers each subscription once with the account tool the
+package ships, in a plain terminal outside any session:
+
+```sh
+pohunek plugin run pohunek.runtime.claude accounts add work --login
+pohunek plugin run pohunek.runtime.claude accounts add personal
+pohunek plugin run pohunek.runtime.claude accounts add side
+pohunek session new --agent claude-personal
+```
+
+`add <name>` without `--login` runs `claude setup-token` on the terminal: the
+owner signs in in the browser that opens, and then pastes the token that
+`setup-token` prints into a hidden prompt. The tool checks the length (40 to 512
+characters) and the character set, refuses a token already stored for another
+account, stores it in `<name>.token` and clears the screen. The token is printed
+once, on screen, and the pasted value is read without echo.
+`add <name> --login` records that the account is the one the shared Claude
+config home is signed in to (`<name>.login`). Only one account may use the
+stored login, because it is one shared file.
+
+Storage and generated files:
+
+- Accounts live in `${XDG_CONFIG_HOME:-$HOME/.config}/pohunek/claude-accounts`
+  (`XDG_CONFIG_HOME` only when it is absolute), a directory of mode 0700 owned by
+  the owner; each file is mode 0600. A path with spaces is refused.
+- An account name is lower-case letters, digits and dashes, at most 32 bytes, and
+  not `acct`, which names the parent profile.
+- `add` writes the profile `claude-acct` through the daemon with `--program` set to
+  the wrapper `claude-account` in the accounts directory, which `add` generates
+  from `bin/claude-account-wrapper.sh`, and one locked preset `claude-<name>` per
+  account (`--opt account=<name>`). The preset sets `CLAUDE_ACCOUNT=<name>`. A
+  preset that already exists is kept as it is.
+- The generated wrapper reads the account named by `CLAUDE_ACCOUNT`, and execs the real
+  `claude` with the stored token in `CLAUDE_CODE_OAUTH_TOKEN` (token accounts). The
+  token never goes into argv or a file, but the Claude process passes its
+  environment on: Bash tool commands, hooks and stdio MCP servers of a token
+  account inherit `CLAUDE_CODE_OAUTH_TOKEN`, so an agent in that session can read it
+  with `env`. Setting `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` in the profile `[env]`
+  strips credentials from those subprocesses; it is off by default because it also
+  isolates Bash subprocesses in a PID namespace on Linux and removes other
+  variables, and the wrapper does not set it. A login account launches with the stored login of the shared config home.
+  `--version` passes straight through, so the version probe needs no account.
+
+Precedence and refusals the wrapper enforces before it starts Claude:
+
+- It unsets `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+  `CLAUDE_CODE_API_KEY_HELPER_TTL_MS`, `CLAUDE_CODE_USE_BEDROCK`,
+  `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `ANTHROPIC_PROFILE`,
+  `ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID` and any inherited
+  `CLAUDE_CODE_OAUTH_TOKEN`, because each outranks the account's token or the
+  stored login. `CLAUDE_CONFIG_DIR` is left as found, since the subscriptions share
+  one home.
+- It refuses `--bare`, and `CLAUDE_CODE_SIMPLE`, because bare mode ignores the
+  environment token and the account would silently be unused.
+- `add` warns, and does not fail, when the installed Claude is below 2.1.318: a
+  work seat with `forceLoginOrgUUID` refuses `setup-token` tokens on older
+  releases.
+
+Rules for the owner and for agents:
+
+- Never run `/login` or `claude auth login` as another account inside a session.
+  The stored login is shared by every session of the config home, so it rewrites
+  the login of the `work` account.
+- Agents never run `plugin run`, and a session refuses to run it
+  (`POHUNEK_SESSION_ID` is set there). The owner runs the setup in a plain terminal.
+- A token account has no Remote Control and no claude.ai connectors.
+- On a seat with `forceLoginOrgUUID`, use Claude 2.1.318 or later.
+- Bare mode ignores the token of a token account, so use the normal launch.
+- `resume` reuses the account the session was started with
+  (`agent_options.account`), so a resumed session keeps its subscription.
+- Terms: a subscription belongs to one person and serves that person's own work.
+  Do not share an account, pool accounts, or switch accounts by quota, for example
+  when a limit is hit. The sign-in completes through Anthropic's own flow
+  (`setup-token`), and the package keeps the token only in the owner's account
+  file. Source:
+  [Claude Code legal and compliance](https://code.claude.com/docs/en/legal-and-compliance).
+
+Commands of the tool:
+
+- `add <name> [--login] [--replace]`: store an account. `--replace` is needed to
+  change an existing one.
+- `list`: every account, with its kind (`token` or `login`) and whether its file
+  is mode 0600.
+- `check-logs`: scans `${XDG_STATE_HOME:-$HOME/.local/state}/pohunek` for the
+  stored token values and prints how many files contain one. It must print `0
+  files contain a stored token`.
+- `version`: the installed Claude version.
+
+The scenario test `scripts/tests/claude-accounts-scenario.sh` (Linux only,
+run by `scripts/tests/test_claude_accounts.py`) drives the tool with a fake
+Claude and a fake `pohunek`. It proves the file modes, the name rules, the
+wrapper's refusals and precedence, and the profile and preset writes; it does
+not start a real Claude or contact Anthropic.
 
 ## Session name
 
@@ -242,6 +343,196 @@ Editing a profile's `[env]` makes its existing sessions ask for
 profiles](../concepts/agent-profiles.md#resuming-a-profile-backed-session)).
 Whether Claude enables synchronized output by itself when the terminal answers
 a mode 2026 query is not verified here.
+
+## Writing your own account wrapper
+
+[One Claude subscription per session](#one-claude-subscription-per-session)
+describes the account tool the package ships. This section is the pattern under
+it, for an owner who writes the profile and the wrapper by hand. Two Claude
+subscriptions (for example a work seat and a personal plan) can each back a
+session and still share one `~/.claude`: one memory, one set of settings, skills,
+plugins and history, and every transcript in `~/.claude/projects`. The pattern is
+the neutral one in [choosing a credential
+with a launch option](../concepts/agent-profiles.md#choosing-a-credential-with-a-launch-option):
+a launch option `account` selects a token file that a wrapper program reads. A
+hand-written setup needs no Pohunek code; Pohunek never creates the profile or
+the wrapper for it, runs `claude setup-token` or `/login`, or reads a token file.
+
+**Which account to pick.** Choose the account by whose work the session is, for
+example work repositories on the work seat and private ones on the personal plan.
+Never choose it by remaining quota. Pohunek reads Anthropic's terms as
+excluding that: the [Usage Policy](https://www.anthropic.com/legal/aup)
+prohibits services that "route requests through consumer subscriptions or
+misrepresent the product or client being used", and the
+[legal and compliance page](https://code.claude.com/docs/en/legal-and-compliance)
+says plan limits "assume ordinary, individual usage" and that developers may not
+"collect, store, or intermediate Claude.ai credentials". This is guidance built
+on those sentences, not a quotation of a rule against switching. So there is no automatic switch when a limit is
+hit, no round-robin or least-used strategy, and no routing of sessions across
+subscriptions by headroom: none of these is supported. A session that hits a
+limit waits for the reset or stops. A local proxy that swaps the token per
+request is not supported either: it stores and intermediates the credential and
+makes limit switching one setting away.
+
+**The credential.** `claude setup-token` runs the browser authorization of
+`/login`, prints a one-year OAuth token for a Pro, Max, Ultra, Team or Enterprise
+plan and saves it nowhere; the owner stores it in a mode 0600 file, one per
+account, in a mode 0700 directory outside `~/.claude` (create it with `chmod
+00700`: a plain `chmod 700` keeps a setgid bit that a setgid parent gave the
+directory, and the wrapper refuses that), and never pastes it into a chat, a
+session, a profile or an issue. Claude reads it from `CLAUDE_CODE_OAUTH_TOKEN`
+(see [authentication](https://code.claude.com/docs/en/authentication#generate-a-long-lived-token)).
+The profile selects the file through a non-secret selector, here
+`CLAUDE_ACCOUNT`:
+
+```toml
+# Keep the profile's existing base, package and digest binding.
+program = "/home/owner/.local/bin/claude-account"
+display_name = "Claude (choose account)"
+
+[options.account]
+label = "Account"
+default = "work"
+choices.work     = { label = "Work",     env = { CLAUDE_ACCOUNT = "work" } }
+choices.personal = { label = "Personal", env = { CLAUDE_ACCOUNT = "personal" } }
+```
+
+The wrapper keeps the token out of the daemon entirely. It answers the
+version-only probe without a token, refuses an unsafe account, directory or file, clears the
+variables that would outrank the token, and ends in `exec` so the launched
+process is Claude itself:
+
+```sh
+#!/bin/sh
+set -eu
+agent=/usr/bin/claude
+accounts=/home/owner/.config/claude-accounts
+
+if [ "$#" -eq 1 ] && [ "$1" = "--version" ] && [ -z "${CLAUDE_ACCOUNT:-}" ]; then
+    exec "$agent" --version
+fi
+
+for arg in "$@"; do
+    if [ "$arg" = "--bare" ]; then
+        echo "claude-account: refusing --bare, it ignores the account token" >&2
+        exit 64
+    fi
+done
+if [ -n "${CLAUDE_CODE_SIMPLE:-}" ]; then
+    echo "claude-account: refusing CLAUDE_CODE_SIMPLE, it ignores the account token" >&2
+    exit 64
+fi
+
+case "${CLAUDE_ACCOUNT:-}" in
+    ""|*[!a-z0-9-]*)
+        echo "claude-account: CLAUDE_ACCOUNT must match [a-z0-9-]+" >&2
+        exit 64
+        ;;
+esac
+
+if [ ! -d "$accounts" ] || [ -L "$accounts" ] || [ ! -O "$accounts" ] \
+    || [ "$(stat -c %a "$accounts")" != 700 ]; then
+    echo "claude-account: $accounts must be a directory owned by you with mode 0700 and no setgid bit" >&2
+    exit 66
+fi
+
+file="$accounts/$CLAUDE_ACCOUNT.token"
+if [ ! -f "$file" ] || [ -L "$file" ] || [ ! -O "$file" ] || [ ! -s "$file" ] \
+    || [ "$(stat -c %a "$file")" != 600 ]; then
+    echo "claude-account: $file must be a non-empty regular file owned by you with mode 0600" >&2
+    exit 66
+fi
+
+unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL \
+    CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY \
+    CLAUDE_CODE_USE_ANTHROPIC_AWS CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD \
+    CLAUDE_CODE_USE_MANTLE
+IFS= read -r CLAUDE_CODE_OAUTH_TOKEN < "$file" || true
+case "$CLAUDE_CODE_OAUTH_TOKEN" in
+    *[![:space:]]*) ;;
+    *)
+        echo "claude-account: $file has no token on its first line" >&2
+        exit 66
+        ;;
+esac
+export CLAUDE_CODE_OAUTH_TOKEN
+unset CLAUDE_ACCOUNT
+exec "$agent" "$@"
+```
+
+Save it as an executable. The launch is identified by the program the wrapper
+`exec`s into, so keep the final `exec` and never add `set -x` or an `echo` of the token, and keep each account's file separate. The
+`stat -c` form is GNU; on macOS use `stat -f %Lp`. `pohunek integration status
+--agent claude --profile <profile>` should report the hooks of the config home
+the session uses: `CLAUDE_CONFIG_DIR` as the wrapper finds it, else `~/.claude`.
+
+**Credential precedence.** Claude picks the first credential present in this
+order ([authentication
+precedence](https://code.claude.com/docs/en/authentication#authentication-precedence)):
+cloud provider variables (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`,
+`CLAUDE_CODE_USE_FOUNDRY`), `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, an
+`apiKeyHelper` script, `CLAUDE_CODE_OAUTH_TOKEN`, Anthropic profile and
+federation credentials, then the stored `/login`. Anything above the token wins
+silently, which is why the wrapper unsets the variables of that list it can.
+The default allowlist of Pohunek's base environment forwards no `ANTHROPIC_*` or
+`CLAUDE_*` variable, so with it those can only come from a profile `[env]`, a
+choice env, the wrapper or Claude's own settings; an owner-set `[environment]
+allowlist` in the service config (see [environment
+resolution](environment-resolution.md)) can forward more. An `apiKeyHelper`, or an `env` block in a user or project settings file that
+names `ANTHROPIC_*`, `CLAUDE_CODE_USE_*` or `CLAUDE_CODE_OAUTH_TOKEN`, replaces
+or outranks the wrapper's token and no environment check sees it: the owner
+checks those files for those names, names only. A signed-in Claude apps gateway
+session sits outside this list and outranks it. `/status` in the session
+shows the login method and account in use. A hand-written profile `[env]` is not
+refused for a credential name (only launch-option choices are), so the rule that
+no token or key goes in `[env]` is the owner's, not an enforced one.
+
+**What a setup-token session lacks.**
+
+- `--bare` and `CLAUDE_CODE_SIMPLE=1` do not read `CLAUDE_CODE_OAUTH_TOKEN`
+  ([bare mode](https://code.claude.com/docs/en/headless#start-faster-with-bare-mode)),
+  so a session started that way is not on the chosen account. Pohunek never
+  passes `--bare`; the wrapper refuses both.
+- The token can only make model requests: no Remote Control session and no
+  claude.ai connectors. Locally configured MCP servers still work. A session
+  that needs either stays on a profile that uses the stored `/login`; existing
+  profiles keep working unchanged.
+- A work seat's organization can set managed settings such as `forceLoginMethod`.
+  Whether they accept an env token is not verified; the owner sees it on the
+  first launch of that account.
+
+**What the token exposes.** The exported `CLAUDE_CODE_OAUTH_TOKEN` is inherited by
+every Bash command, hook and stdio MCP server Claude starts, so a session that
+runs `env` or `printenv` copies it into its transcript. Pohunek never records it:
+the profile, the revision, `session inspect`, the logs and the hook trace carry
+only the selector. `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` removes credentials from
+those subprocesses; the [environment variable
+reference](https://code.claude.com/docs/en/env-vars#what-the-subprocess-environment-scrub-removes)
+says the scrub recognizes a credential "by its variable name or by the shape of
+its value" and lists `NPM_TOKEN` as removed because of its name. It does not name
+`CLAUDE_CODE_OAUTH_TOKEN`, so that the scrub removes it follows from the name rule
+and is not confirmed by a run. On Linux the scrub also isolates Bash
+subprocesses in their own PID namespace, so `ps`, `pgrep` and `kill` cannot see
+host processes, and it may break a hook that inspects its parent process.
+Whether the Pohunek hooks and CLI keep working under the scrub is not verified;
+the wrapper does not enable it by default.
+
+**Resume.** Keep one token file per account and never point a name at another
+account's file; see the resume warning in [choosing a credential with a launch
+option](../concepts/agent-profiles.md#choosing-a-credential-with-a-launch-option).
+
+**Not verified (owner-pending).** Everything above that needs a real subscription
+token has not been run: that `/status` shows the expected account in each
+session, that skills, memory and transcripts are shared, that a resume keeps the
+account, that the wrapper's `exec` leaves the launched process as Claude, that a
+second concurrent account does not disturb the shared `~/.claude.json` or the
+stored login, that the scrub removes the token without breaking the hooks, what
+happens at the first usage limit of a setup-token session, and a report that
+`setup-token` tokens were rejected outside Claude Code's own request shape
+([anthropics/claude-code#28089](https://github.com/anthropics/claude-code/issues/28089),
+a user report about third-party integrations, closed as not planned). The
+wrapper's refusals and its probe path were exercised with a fake agent and dummy
+token files only.
 
 ## First-run state of a Claude home
 
@@ -461,6 +752,21 @@ open and the records stay authoritative
   `state=clear`, with any detector
   reconfiguration (a nested agent exiting, a package refresh) and with the
   runtime. Initial-input readiness ignores the record: the prompt box decides.
+- A usage limit cannot be triggered on demand, so the daemon journals it
+  passively. When the visible screen names a usage limit, the detector records
+  one sighting per screen and the session loop logs it at info under
+  `session.program_status.limit_screen`, at most a bounded number of sightings
+  per detector: the matched marker, the held record in
+  canonical form, its age and staleness, the latest unmapped 7501 tokens and the
+  published activity. After the cap the detector queues one suppression line and
+  writes no further sighting, so a transcript that quotes a marker cannot flood
+  the log. The unmapped journal that feeds it is written only for an
+  opted-in runtime and once per distinct `(reason, state, kind, app)` tuple, up
+  to a bounded set per session; after the set is full it writes one suppression
+  line, so repeated or varied records do not flood the log. Claude's real limit screen has not been
+  captured yet; the marker list and the journal line are how the next real hit
+  leaves evidence (#2101). The journal changes no activity, attention or input
+  readiness.
 - With the probe answered Claude sets the plain title `Claude Code` in
   every state (the session name when the session is named, see
   [Session name](#session-name)), and the manifest reads no state from a title.
@@ -597,6 +903,17 @@ compaction, MCP and other dialogs, the `PermissionRequest` hook, terminals
 narrower than 20 columns, and a hosted CI run of the `claude-package` job. The
 first-run capture needs egress; the absence of egress in every other run is
 established by the network namespace, not by Claude's own switches.
+
+The account tool was tested with a fake Claude and a fake daemon only. Three
+owner checks need real subscription tokens and are not verified yet:
+
+- O1: start `claude-work`, `claude-personal` and `claude-side`, and run `/status`
+  in each; each shows the expected account email and a claude.ai login, and no API
+  key.
+- O2: stop a session of a token account and resume it; `/status` shows the same
+  email.
+- O3: `pohunek plugin run pohunek.runtime.claude accounts check-logs` prints `0
+  files contain a stored token`.
 
 ## How the package is kept honest
 

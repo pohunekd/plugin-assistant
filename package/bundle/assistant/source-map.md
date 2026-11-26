@@ -27,7 +27,7 @@ Current CLI and command surface:
 - `crates/hostcheck/src/macos.rs` — macOS doctor checks and the bounded `launchctl` domain probe.
 - `crates/hostcheck/src/executable.rs` — exec-bit-aware executable resolution.
 - `crates/cli/src/commands/daemon.rs`
-- `crates/cli/src/commands/service.rs` — `pohunek service install|upgrade|uninstall|status|check|lock`.
+- `crates/cli/src/commands/service.rs` — `pohunek service install|upgrade|uninstall|status|check|lock`; after a committed upgrade it hands the report to `crates/cli/src/commands/upgrade_assistant.rs`, which installs the assistant package the plugin index lists for the new core and reports it (`assistant`, with `install.result`; `--no-assistant-package` skips it).
 - `crates/cli/src/service/` — the service transactions: install journal and
   transaction lock with the holder record `pohunek service lock` publishes
   (`record.rs`), the holder token its command adopts the lock with through
@@ -46,6 +46,15 @@ Current CLI and command surface:
 - `crates/cli/src/commands/setup.rs`
 - `crates/cli/src/commands/setup_host.rs`
 - `crates/cli/src/commands/setup_assistant.rs`
+- `crates/cli/src/commands/upgrade_assistant.rs` — the assistant package step of
+  `pohunek service upgrade`: gate, owner hold, install through the index path of
+  `setup_assistant.rs`, and the `assistant.install` outcome.
+- `crates/cli/src/commands/assistant/mod.rs` — the `assistant_package_missing`
+  recovery: a local launch plans through `setup_assistant.rs` against the
+  daemon's core version, installs through the daemon's signed plugin index
+  verification and retries once; the returned error carries the plan's
+  runnable remedy as its recovery hint. A remote launch names
+  `pohunek assistant setup` for that host and installs nothing.
 - `crates/cli/src/commands/setup_hooks.rs`
 - `crates/cli/src/commands/host.rs`
 - `crates/cli/src/commands/integration.rs`
@@ -402,7 +411,8 @@ Release packaging and contributor verification:
 - `packaging/macos/DEPLOYMENT_TARGET` — the macOS deployment target (`14.0`)
   every native macOS build and audit uses.
 - `packaging/macos/build-release` — locked, deployment-target-pinned,
-  path-remapped native Apple Silicon release build of one component.
+  path-remapped native Apple Silicon release build of one component (`cli`,
+  `daemon`, or the plugin `kit`).
 - `packaging/macos/audit-macho` — fails a release tree unless every Mach-O file
   is thin arm64, within the deployment target, linked only against system
   libraries, with no runtime search path and no build-machine path.
@@ -474,6 +484,15 @@ Daemon, sessions, integrations, and project state:
   and the daemon unit/slice installer.
 - `crates/platform/src/shell_env/` — executable search-path policy: bounded
   login-shell discovery, path validation, and executable resolution (see
+  `docs/knowledge/guides/environment-resolution.md`).
+- `crates/daemon/src/runtime/manager_path.rs` — the systemd user manager's
+  `PATH` a daemon follows. Each `ManagerPath`, owned by one session registry,
+  holds its own search path and the registry refreshes it where it resolves or
+  launches an agent. An operation takes one `SearchPath` snapshot from that
+  refresh and passes it to every resolver, `git` spawn and hook it reaches
+  (`git`, the hook interpreter, the hook `PATH`, the checkout-trust `git`, the
+  capability `git` probe); no process-wide copy exists. Work that starts no
+  agent takes the registry's last read without a new one (see
   `docs/knowledge/guides/environment-resolution.md`).
 - `docs/knowledge/guides/environment-resolution.md` — how the daemon and
   agents resolve `PATH` and executables.
@@ -616,7 +635,11 @@ Agent runtime and profile resolution:
 - `crates/daemon/src/agent/profile.rs`
 - `crates/daemon/src/agent/credential.rs` — the daemon's path to the credential-literal detector of `crates/package/src/credential.rs`.
 - `crates/daemon/src/agent/profile/compose.rs` — composes the text of a new profile.
-- `crates/daemon/src/packages/create.rs` — `package.create_profile` (with `options_toml`) and `package.create_preset`.
+- `crates/daemon/src/packages/create.rs` — `package.create_profile` (with `options_toml` and `program`) and `package.create_preset`.
+- `crates/daemon/src/package_setup/mod.rs` — `package.setup_resolve`: the verified program and fixed arguments of a setup entry; the daemon never runs it.
+- `crates/daemon/src/agent/host/setup.rs` — the `[setup.<name>]` descriptor table (`package-setup-v1`).
+- `crates/protocol/src/setup.rs` — `SetupInfo`, `SetupResolveParams` and `SetupResolveResult`.
+- `crates/cli/src/commands/plugin_run.rs` — `pohunek plugin run`: the terminal and environment rules, the argument bounds and the exit status of a setup program.
 - `crates/daemon/src/packages/remove.rs` — `package.remove_profile`: the refusals and the inode-bound removal of a profile file.
 - `crates/daemon/src/session/profile_use.rs` — which profiles running sessions use, and the create re-check under the launch guard.
 - `crates/daemon/src/agent/host/`
@@ -655,12 +678,13 @@ Runtime package archive format:
 - `crates/daemon/src/agent/host/config_home.rs` — the `[config_home]` descriptor declaration and the one resolver of a runtime's config directory.
 - `crates/daemon/src/agent/host/transcripts.rs` — the `[transcripts]` descriptor declaration: transcript tree below the config home or a root of its own (`root_env`/`root_home`), the walk depth and the compiled parser id.
 - `crates/daemon/src/external/muse.rs` — the `muse-session-v1` parser: dated session logs, framed or bare records.
+- `crates/daemon/src/external/cline.rs` — the `cline-session-v1` parser: `<id>/<id>.json` session manifests within the 64 KiB bound.
 - `crates/daemon/src/agent/native_reference/dir_name.rs` — the descriptor-only `dir_name` existence declaration of a hook runtime (not part of the persisted `ExistenceSpec`).
 - `crates/daemon/src/agent/host/features.rs` — the append-only runtime feature table, the descriptor `requires` check and the feature-gated key rules.
 - `crates/daemon/src/api/handler/package.rs` — `package.*` handlers and the local-only gate.
 - `crates/daemon/src/agent/profile.rs` — profile `package`/`digest` pins and `pinned_digests`.
 - `crates/protocol/src/package.rs` — `package.*` payloads and stable error codes.
-- `crates/cli/src/commands/plugin.rs` — `pohunek plugin list|inspect|install|link|update|select|enable|disable|uninstall|doctor`.
+- `crates/cli/src/commands/plugin.rs` — `pohunek plugin list|inspect|install|link|update|select|enable|disable|uninstall|doctor|compat`; `compat` reports the `runtime_api` and `runtime_features` of `host.inspect`.
 - `crates/cli/src/commands/plugin_profile.rs` — `pohunek plugin profile list|migrate|create|show`, including `create --options-file` and `create --preset-of`.
 - `crates/cli/src/commands/profile_fold.rs` — `pohunek plugin profile fold`: the proposal of a parent with options and one preset per input.
 - `crates/package/src/credential.rs` — the credential-literal detector the daemon's profile checks and `plugin profile fold` share.
@@ -688,6 +712,9 @@ Runtime package archive format:
 - `crates/cli/tests/codex_package.rs` — pure package tests (descriptor and manifest parity with the v0.34.2 built-in goldens), catalog-installed package launch and version-probe tests, the clean-host scenarios (bare `codex`, its integration and an unpinned `base = "codex"` profile refused with the install hint until the package is installed), and the opt-in real-Codex tests.
 - `crates/cli/tests/support/responses_stub.rs` — loopback Responses-API stub used instead of a model provider.
 - `runtime-packages/claude/runtime.toml` — Claude Code runtime descriptor (hook native reference, resume argv, `semver-line-v1` version probe).
+- `runtime-packages/claude/bin/claude-accounts` — the Claude account tool (`add`, `list`, `check-logs`, `version`), run by `pohunek plugin run pohunek.runtime.claude accounts`.
+- `runtime-packages/claude/bin/claude-account-wrapper.sh` — the launch wrapper template the tool writes as `claude-account` in the accounts directory.
+- `scripts/tests/claude-accounts-scenario.sh` — the Linux scenario of the account tool and wrapper, run by `scripts/tests/test_claude_accounts.py`.
 - `runtime-packages/claude/detect.toml` — Claude Code detection manifest: the v0.34.2 built-in one plus the #613 rules (running-turn footer, wrapped selection forms, first-run and trust dialogs, the npm `claude.exe` process); the daemon compiles no Claude in, so this package is the only source of `claude`.
 - `compat/claude/compatibility-lock.json` — pinned Claude Code release, native binary SHA-256 and supported range.
 - `compat/claude/screens/` — screens and terminal titles captured from a real Claude Code that the manifest test classifies.
